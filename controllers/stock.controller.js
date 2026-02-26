@@ -145,7 +145,14 @@ exports.getWarehouseStock = async (req, res) => {
 
     // Stocklarni olish
     const stocks = await Stock.find({ warehouseId })
-      .populate("productId", "name model barcode baseUnit")
+      .populate({
+        path: "productId",
+        select: "name model barcode baseUnit categoryId",
+        populate: {
+          path: "categoryId",
+          select: "name description isActive",
+        },
+      })
       .lean();
 
     return res.status(200).json({

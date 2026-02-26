@@ -4,6 +4,7 @@ const Product = require("../models/Product");
 const Stock = require("../models/Stock");
 const Warehouse = require("../models/Warehouse");
 const Supplier = require("../models/Supplier");
+const Category = require("../models/Category");
 
 exports.createPurchase = async (req, res) => {
   const session = await mongoose.startSession();
@@ -73,6 +74,9 @@ exports.createPurchase = async (req, res) => {
           productId,
           name,
           model,
+          categoryId,
+          categoryName,
+          category,
           barcode,
           hasPackage,
           packageQuantity,
@@ -85,6 +89,40 @@ exports.createPurchase = async (req, res) => {
           inputType,
           inputQuantity,
         } = item;
+
+        let resolvedCategoryId = null;
+        if (categoryId) {
+          if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+            throw new Error("Invalid categoryId");
+          }
+          const categoryExists = await Category.findById(categoryId).session(session);
+          if (!categoryExists) {
+            throw new Error("Category not found");
+          }
+          resolvedCategoryId = categoryExists._id;
+        } else {
+          const incomingCategoryName = (category?.name || categoryName || "").trim();
+          if (incomingCategoryName) {
+            let foundCategory = await Category.findOne({ name: incomingCategoryName }).session(
+              session,
+            );
+
+            if (!foundCategory) {
+              const createdCategories = await Category.create(
+                [
+                  {
+                    name: incomingCategoryName,
+                    description: category?.description || "",
+                  },
+                ],
+                { session },
+              );
+              [foundCategory] = createdCategories;
+            }
+
+            resolvedCategoryId = foundCategory._id;
+          }
+        }
 
         if (!["unit", "block"].includes(inputType)) {
           throw new Error("Invalid inputType. Use 'unit' or 'block'");
@@ -130,6 +168,7 @@ exports.createPurchase = async (req, res) => {
               {
                 name,
                 model,
+                categoryId: resolvedCategoryId,
                 barcode,
                 hasPackage,
                 packageQuantity: hasPackage ? packageQuantity : null,
@@ -143,6 +182,10 @@ exports.createPurchase = async (req, res) => {
             { session },
           );
           [product] = createdProducts;
+        }
+
+        if (resolvedCategoryId) {
+          product.categoryId = resolvedCategoryId;
         }
 
         let quantity = 0;

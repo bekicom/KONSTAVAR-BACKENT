@@ -9,9 +9,6 @@ const connectDB = require("./config/db");
 
 const app = express();
 
-// 🔹 DB connect
-connectDB();
-
 // 🔹 Middlewares
 app.use(express.json());
 app.use(cors());
@@ -28,6 +25,12 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`🚀 KONSTAVAR server running on port ${PORT}`);
-});
+const startServer = async () => {
+  await connectDB();
+
+  app.listen(PORT, () => {
+    console.log(`🚀 KONSTAVAR server running on port ${PORT}`);
+  });
+};
+
+startServer();

@@ -12,6 +12,7 @@ const supplierController = require("../controllers/supplierController");
 const userController = require("../controllers/userController");
 const supplierReturnController = require("../controllers/supplierReturnController");
 const writeoffController = require("../controllers/writeoffController");
+const categoryController = require("../controllers/categoryController");
 
 
 // Admin create (faqat 1 marta)
@@ -230,6 +231,48 @@ router.get(
   authMiddleware,
   roleMiddleware("admin", "warehouse"),
   supplierController.getSupplierLedger,
+);
+
+router.get(
+  "/suppliers/:id/act-sverka",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  supplierController.getSupplierActSverka,
+);
+
+router.post(
+  "/categories",
+  authMiddleware,
+  roleMiddleware("admin"),
+  categoryController.createCategory,
+);
+
+router.get(
+  "/categories",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  categoryController.getCategories,
+);
+
+router.get(
+  "/categories/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  categoryController.getCategoryById,
+);
+
+router.put(
+  "/categories/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  categoryController.updateCategory,
+);
+
+router.delete(
+  "/categories/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  categoryController.deleteCategory,
 );
 
 // CREATE

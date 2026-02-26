@@ -15,6 +15,13 @@ const productSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // Kategoriya
+    categoryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
+      default: null,
+    },
+
     // Barcode (agar user bermasa auto generate)
     barcode: {
       type: String,
