@@ -10,6 +10,8 @@ const purchaseController = require("../controllers/purchaseController");
 const stockController = require("../controllers/stock.controller");
 const supplierController = require("../controllers/supplierController");
 const userController = require("../controllers/userController");
+const supplierReturnController = require("../controllers/supplierReturnController");
+const writeoffController = require("../controllers/writeoffController");
 
 
 // Admin create (faqat 1 marta)
@@ -158,6 +160,69 @@ router.delete(
   authMiddleware,
   roleMiddleware("admin"),
   supplierController.deleteSupplierPayment,
+);
+
+router.post(
+  "/supplier-returns",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  supplierReturnController.createSupplierReturn,
+);
+
+router.get(
+  "/supplier-returns",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  supplierReturnController.getSupplierReturns,
+);
+
+router.get(
+  "/supplier-returns/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  supplierReturnController.getSupplierReturnById,
+);
+
+router.delete(
+  "/supplier-returns/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  supplierReturnController.deleteSupplierReturn,
+);
+
+router.post(
+  "/writeoffs",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  writeoffController.createWriteoff,
+);
+
+router.get(
+  "/writeoffs",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  writeoffController.getWriteoffs,
+);
+
+router.get(
+  "/writeoffs/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  writeoffController.getWriteoffById,
+);
+
+router.put(
+  "/writeoffs/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  writeoffController.updateWriteoff,
+);
+
+router.delete(
+  "/writeoffs/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  writeoffController.deleteWriteoff,
 );
 
 router.get(

@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Supplier = require("../models/Supplier");
 const Purchase = require("../models/Purchase");
 const SupplierPayment = require("../models/SupplierPayment");
+const SupplierReturn = require("../models/SupplierReturn");
 
 exports.createSupplier = async (req, res) => {
   try {
@@ -114,15 +115,16 @@ exports.deleteSupplier = async (req, res) => {
       return res.status(404).json({ message: "Supplier not found" });
     }
 
-    const [purchaseCount, paymentCount] = await Promise.all([
+    const [purchaseCount, paymentCount, returnCount] = await Promise.all([
       Purchase.countDocuments({ supplierId: id }),
       SupplierPayment.countDocuments({ supplierId: id }),
+      SupplierReturn.countDocuments({ supplierId: id }),
     ]);
 
-    if (purchaseCount > 0 || paymentCount > 0) {
+    if (purchaseCount > 0 || paymentCount > 0 || returnCount > 0) {
       return res.status(400).json({
         message:
-          "Supplier has purchase/payment history. Use update (isActive=false) instead of delete",
+          "Supplier has purchase/payment/return history. Use update (isActive=false) instead of delete",
       });
     }
 
@@ -307,11 +309,23 @@ exports.getSupplierLedger = async (req, res) => {
       },
     ]);
 
+    const [returnStats] = await SupplierReturn.aggregate([
+      { $match: { supplierId: supplierObjectId } },
+      {
+        $group: {
+          _id: null,
+          totalReturned: { $sum: "$totalAmount" },
+          returnCount: { $sum: 1 },
+        },
+      },
+    ]);
+
     const totalPurchased = purchaseStats?.totalPurchased || 0;
     const totalPaidAtPurchase = purchaseStats?.totalPaidAtPurchase || 0;
     const totalManualPayments = paymentStats?.totalManualPayments || 0;
+    const totalReturned = returnStats?.totalReturned || 0;
     const totalPaid = totalPaidAtPurchase + totalManualPayments;
-    const outstandingDebt = Number((totalPurchased - totalPaid).toFixed(2));
+    const outstandingDebt = Number((totalPurchased - totalPaid - totalReturned).toFixed(2));
 
     const purchases = await Purchase.find({ supplierId: id })
       .sort({ createdAt: -1 })
@@ -327,19 +341,30 @@ exports.getSupplierLedger = async (req, res) => {
       .populate("createdBy", "fullName role")
       .lean();
 
+    const returns = await SupplierReturn.find({ supplierId: id })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .populate("warehouseId", "name")
+      .populate("createdBy", "fullName role")
+      .populate("items.productId", "name model barcode")
+      .lean();
+
     res.json({
       supplier,
       summary: {
         totalPurchased,
         totalPaidAtPurchase,
         totalManualPayments,
+        totalReturned,
         totalPaid,
         outstandingDebt,
         purchaseCount: purchaseStats?.purchaseCount || 0,
         paymentCount: paymentStats?.paymentCount || 0,
+        returnCount: returnStats?.returnCount || 0,
       },
       purchases,
       payments,
+      returns,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
