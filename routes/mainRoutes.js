@@ -13,6 +13,7 @@ const userController = require("../controllers/userController");
 const supplierReturnController = require("../controllers/supplierReturnController");
 const writeoffController = require("../controllers/writeoffController");
 const categoryController = require("../controllers/categoryController");
+const inventoryController = require("../controllers/inventoryController");
 
 
 // Admin create (faqat 1 marta)
@@ -290,6 +291,13 @@ router.get(
   productController.getProducts
 );
 
+router.get(
+  "/products/barcode/:barcode",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  productController.getProductByBarcode
+);
+
 // GET BY ID
 router.get(
   "/products/get/:id",
@@ -388,6 +396,48 @@ router.delete(
   authMiddleware,
   roleMiddleware("admin"),
   stockController.deleteStock,
+);
+
+router.post(
+  "/inventories/sessions",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  inventoryController.createInventorySession,
+);
+
+router.get(
+  "/inventories/sessions",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  inventoryController.getInventorySessions,
+);
+
+router.get(
+  "/inventories/sessions/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  inventoryController.getInventorySessionById,
+);
+
+router.put(
+  "/inventories/sessions/:id/count",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  inventoryController.updateInventoryCount,
+);
+
+router.post(
+  "/inventories/sessions/:id/post",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  inventoryController.postInventorySession,
+);
+
+router.post(
+  "/inventories/sessions/:id/cancel",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  inventoryController.cancelInventorySession,
 );
 
 module.exports = router;

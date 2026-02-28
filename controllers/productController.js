@@ -1,6 +1,7 @@
 const Product = require("../models/Product");
 const mongoose = require("mongoose");
 const Category = require("../models/Category");
+const Stock = require("../models/Stock");
 
 // 🔹 CREATE
 exports.createProduct = async (req, res) => {
@@ -67,6 +68,76 @@ exports.getProductById = async (req, res) => {
     }
 
     res.json(product);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 🔹 GET BY BARCODE (optional: warehouse stock)
+exports.getProductByBarcode = async (req, res) => {
+  try {
+    const { barcode } = req.params;
+    const { warehouseId } = req.query;
+
+    const normalizedBarcode = String(barcode || "").trim();
+    if (!normalizedBarcode) {
+      return res.status(400).json({ message: "barcode is required" });
+    }
+
+    const product = await Product.findOne({ barcode: normalizedBarcode })
+      .populate("categoryId", "name")
+      .lean();
+
+    if (!product) {
+      return res.status(404).json({ message: "Product not found by barcode" });
+    }
+
+    if (warehouseId) {
+      if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
+        return res.status(400).json({ message: "Invalid warehouseId query" });
+      }
+
+      const stock = await Stock.findOne({
+        productId: product._id,
+        warehouseId,
+      })
+        .populate("warehouseId", "name")
+        .lean();
+
+      return res.json({
+        product,
+        stock: {
+          totalQuantity: Number(stock?.quantity || 0),
+          byWarehouse: stock
+            ? [
+                {
+                  warehouseId: stock.warehouseId?._id || warehouseId,
+                  warehouseName: stock.warehouseId?.name || null,
+                  quantity: Number(stock.quantity || 0),
+                },
+              ]
+            : [],
+        },
+      });
+    }
+
+    const stocks = await Stock.find({ productId: product._id })
+      .populate("warehouseId", "name")
+      .lean();
+
+    const totalQuantity = stocks.reduce((sum, s) => sum + Number(s.quantity || 0), 0);
+
+    res.json({
+      product,
+      stock: {
+        totalQuantity: Number(totalQuantity.toFixed(2)),
+        byWarehouse: stocks.map((s) => ({
+          warehouseId: s.warehouseId?._id || null,
+          warehouseName: s.warehouseId?.name || null,
+          quantity: Number(s.quantity || 0),
+        })),
+      },
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
