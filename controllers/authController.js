@@ -1,6 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const Shop = require("../models/Shop");
 
 // 🔹 ADMIN CREATE (faqat 1 marta)
 exports.createAdmin = async (req, res) => {
@@ -40,7 +41,7 @@ exports.login = async (req, res) => {
   try {
     const { phone, password } = req.body;
 
-    const user = await User.findOne({ phone });
+    const user = await User.findOne({ phone }).populate("shopId", "name warehouseId isActive");
     if (!user) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
@@ -70,6 +71,8 @@ exports.login = async (req, res) => {
         id: user._id,
         fullName: user.fullName,
         role: user.role,
+        shopId: user.shopId?._id || null,
+        shopWarehouseId: user.shopId?.warehouseId || null,
       },
     });
   } catch (error) {
@@ -80,10 +83,23 @@ exports.login = async (req, res) => {
 // 🔹 USER CREATE (Admin warehouse/cashier yaratadi)
 exports.createUser = async (req, res) => {
   try {
-    const { fullName, phone, password, role } = req.body;
+    const { fullName, phone, password, role, shopId } = req.body;
 
     if (!["warehouse", "cashier"].includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
+    }
+
+    let resolvedShopId = null;
+    if (role === "cashier") {
+      if (!shopId) {
+        return res.status(400).json({ message: "shopId is required for cashier" });
+      }
+
+      const shop = await Shop.findOne({ _id: shopId, isActive: true }).lean();
+      if (!shop) {
+        return res.status(400).json({ message: "Invalid or inactive shopId for cashier" });
+      }
+      resolvedShopId = shop._id;
     }
 
     const existing = await User.findOne({ phone });
@@ -98,6 +114,7 @@ exports.createUser = async (req, res) => {
       phone,
       password: hashedPassword,
       role,
+      shopId: resolvedShopId,
     });
 
     // 🔥 Passwordni chiqarib tashlaymiz

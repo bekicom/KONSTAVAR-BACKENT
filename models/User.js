@@ -25,6 +25,11 @@ const userSchema = new mongoose.Schema(
       enum: ["admin", "warehouse", "cashier"],
       required: true,
     },
+    shopId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shop",
+      default: null,
+    },
 
     isActive: {
       type: Boolean,

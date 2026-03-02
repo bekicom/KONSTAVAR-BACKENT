@@ -14,6 +14,8 @@ const supplierReturnController = require("../controllers/supplierReturnControlle
 const writeoffController = require("../controllers/writeoffController");
 const categoryController = require("../controllers/categoryController");
 const inventoryController = require("../controllers/inventoryController");
+const saleController = require("../controllers/saleController");
+const shopController = require("../controllers/shopController");
 
 
 // Admin create (faqat 1 marta)
@@ -294,7 +296,7 @@ router.get(
 router.get(
   "/products/barcode/:barcode",
   authMiddleware,
-  roleMiddleware("admin", "warehouse"),
+  roleMiddleware("admin", "warehouse", "cashier"),
   productController.getProductByBarcode
 );
 
@@ -396,6 +398,118 @@ router.delete(
   authMiddleware,
   roleMiddleware("admin"),
   stockController.deleteStock,
+);
+
+router.post(
+  "/shops",
+  authMiddleware,
+  roleMiddleware("admin"),
+  shopController.createShop,
+);
+
+router.get(
+  "/shops",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  shopController.getShops,
+);
+
+router.get(
+  "/shops/transfers",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  shopController.getShopTransfers,
+);
+
+router.get(
+  "/shops/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  shopController.getShopById,
+);
+
+router.put(
+  "/shops/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  shopController.updateShop,
+);
+
+router.delete(
+  "/shops/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  shopController.deleteShop,
+);
+
+router.post(
+  "/shops/:id/transfers",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  shopController.transferToShop,
+);
+
+router.post(
+  "/sales",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.createSale,
+);
+
+router.get(
+  "/sales",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getSales,
+);
+
+router.get(
+  "/sales/barcode/:barcode",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getSaleProductByBarcode,
+);
+
+router.get(
+  "/sales/search-products",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.searchSaleProducts,
+);
+
+router.get(
+  "/sales/returns/search-barcode/:barcode",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.searchSaleHistoryByBarcode,
+);
+
+router.post(
+  "/sales/returns",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.createSaleReturn,
+);
+
+router.get(
+  "/sales/:id/returns",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getSaleReturnsBySaleId,
+);
+
+router.get(
+  "/sales/:id",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getSaleById,
+);
+
+router.delete(
+  "/sales/:id",
+  authMiddleware,
+  roleMiddleware("admin"),
+  saleController.deleteSale,
 );
 
 router.post(
