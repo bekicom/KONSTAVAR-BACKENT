@@ -61,9 +61,14 @@ const saleSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    clientId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Client",
+      default: null,
+    },
     paymentType: {
       type: String,
-      enum: ["cash", "card", "click", "mixed"],
+      enum: ["cash", "card", "click", "mixed", "credit"],
       required: true,
     },
     cashAmount: {
@@ -75,6 +80,14 @@ const saleSchema = new mongoose.Schema(
       default: 0,
     },
     clickAmount: {
+      type: Number,
+      default: 0,
+    },
+    paidAmount: {
+      type: Number,
+      default: 0,
+    },
+    dueAmount: {
       type: Number,
       default: 0,
     },

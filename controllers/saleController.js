@@ -5,6 +5,8 @@ const Product = require("../models/Product");
 const Stock = require("../models/Stock");
 const Warehouse = require("../models/Warehouse");
 const Shop = require("../models/Shop");
+const ShopQuickProduct = require("../models/ShopQuickProduct");
+const Client = require("../models/Client");
 
 const round2 = (value) => Number(Number(value).toFixed(2));
 
@@ -177,6 +179,19 @@ const resolveWarehouseForSale = async (user, requestedWarehouseId, session = nul
   throw new Error("Assign shopId to this user or send warehouseId");
 };
 
+const resolveShopForSale = async (user, session = null) => {
+  const warehouseId = await resolveWarehouseForSale(user, null, session);
+
+  let shopQuery = Shop.findOne({ warehouseId, isActive: true });
+  if (session) shopQuery = shopQuery.session(session);
+  const shop = await shopQuery;
+  if (!shop) {
+    throw new Error("Active shop not found for warehouse");
+  }
+
+  return { shop, warehouseId };
+};
+
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 exports.createSale = async (req, res) => {
@@ -191,6 +206,9 @@ exports.createSale = async (req, res) => {
       cashAmount,
       cardAmount,
       clickAmount,
+      paidAmount,
+      clientId,
+      client,
       note,
     } = req.body;
 
@@ -208,6 +226,34 @@ exports.createSale = async (req, res) => {
     await session.withTransaction(async () => {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
+      const normalizedPaymentType = paymentType || "cash";
+
+      let resolvedClient = null;
+      if (clientId) {
+        if (!mongoose.Types.ObjectId.isValid(clientId)) {
+          throw new Error("Invalid clientId");
+        }
+        resolvedClient = await Client.findById(clientId).session(session);
+      }
+      if (!resolvedClient && client?.name) {
+        if (client.phone) {
+          resolvedClient = await Client.findOne({ phone: client.phone }).session(session);
+        }
+        if (!resolvedClient) {
+          const createdClients = await Client.create(
+            [
+              {
+                name: client.name,
+                phone: client.phone,
+                address: client.address,
+                note: client.note,
+              },
+            ],
+            { session },
+          );
+          [resolvedClient] = createdClients;
+        }
+      }
 
       let subtotal = 0;
       const processedItems = [];
@@ -301,13 +347,75 @@ exports.createSale = async (req, res) => {
         );
       }
 
-      const payment = validateAndResolvePayment(
-        paymentType,
-        cashAmount,
-        cardAmount,
-        clickAmount,
-        totalAmount,
-      );
+      let payment;
+      let normalizedPaidAmount = totalAmount;
+      let dueAmount = 0;
+
+      if (normalizedPaymentType === "credit") {
+        if (!resolvedClient) {
+          throw new Error("For credit sale, clientId or client{name,...} is required");
+        }
+
+        const hasSplitInput =
+          cashAmount !== undefined || cardAmount !== undefined || clickAmount !== undefined;
+
+        let normalizedCash = Number(cashAmount);
+        let normalizedCard = Number(cardAmount);
+        let normalizedClick = Number(clickAmount);
+        if (!Number.isFinite(normalizedCash)) normalizedCash = 0;
+        if (!Number.isFinite(normalizedCard)) normalizedCard = 0;
+        if (!Number.isFinite(normalizedClick)) normalizedClick = 0;
+        if (normalizedCash < 0 || normalizedCard < 0 || normalizedClick < 0) {
+          throw new Error("cashAmount/cardAmount/clickAmount cannot be negative");
+        }
+
+        normalizedPaidAmount = Number(paidAmount);
+        if (!Number.isFinite(normalizedPaidAmount)) {
+          normalizedPaidAmount = hasSplitInput
+            ? round2(normalizedCash + normalizedCard + normalizedClick)
+            : 0;
+        }
+        normalizedPaidAmount = round2(normalizedPaidAmount);
+
+        if (normalizedPaidAmount < 0) {
+          throw new Error("paidAmount cannot be negative");
+        }
+        if (normalizedPaidAmount > totalAmount) {
+          throw new Error("paidAmount cannot be greater than totalAmount");
+        }
+
+        if (hasSplitInput) {
+          if (round2(normalizedCash + normalizedCard + normalizedClick) !== normalizedPaidAmount) {
+            throw new Error("For credit sale, cashAmount + cardAmount + clickAmount must equal paidAmount");
+          }
+        } else {
+          normalizedCash = normalizedPaidAmount;
+          normalizedCard = 0;
+          normalizedClick = 0;
+        }
+
+        dueAmount = round2(totalAmount - normalizedPaidAmount);
+        if (dueAmount <= 0) {
+          throw new Error("For credit sale, dueAmount must be greater than 0");
+        }
+
+        payment = {
+          paymentType: "credit",
+          cashAmount: round2(normalizedCash),
+          cardAmount: round2(normalizedCard),
+          clickAmount: round2(normalizedClick),
+        };
+      } else {
+        payment = validateAndResolvePayment(
+          normalizedPaymentType,
+          cashAmount,
+          cardAmount,
+          clickAmount,
+          totalAmount,
+        );
+        normalizedPaidAmount = totalAmount;
+        dueAmount = 0;
+      }
 
       const createdSales = await Sale.create(
         [
@@ -321,6 +429,9 @@ exports.createSale = async (req, res) => {
             cashAmount: payment.cashAmount,
             cardAmount: payment.cardAmount,
             clickAmount: payment.clickAmount,
+            paidAmount: normalizedPaidAmount,
+            dueAmount,
+            clientId: resolvedClient ? resolvedClient._id : null,
             note,
             createdBy: req.user._id,
           },
@@ -341,6 +452,7 @@ exports.createSale = async (req, res) => {
       error.message.includes("required") ||
       error.message.includes("positive") ||
       error.message.includes("cannot") ||
+      error.message.includes("greater than") ||
       error.message.includes("Insufficient") ||
       error.message.includes("not found") ||
       error.message.includes("must")
@@ -391,7 +503,7 @@ exports.getSales = async (req, res) => {
     }
 
     if (paymentType) {
-      if (!["cash", "card", "click", "mixed"].includes(paymentType)) {
+      if (!["cash", "card", "click", "mixed", "credit"].includes(paymentType)) {
         return res.status(400).json({ message: "Invalid paymentType query" });
       }
       query.paymentType = paymentType;
@@ -426,6 +538,7 @@ exports.getSales = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(normalizedLimit)
       .populate("warehouseId", "name")
+      .populate("clientId", "name phone")
       .populate("createdBy", "fullName role")
       .populate("items.productId", "name model barcode");
 
@@ -444,6 +557,7 @@ exports.getSaleById = async (req, res) => {
 
     const sale = await Sale.findById(id)
       .populate("warehouseId", "name")
+      .populate("clientId", "name phone address")
       .populate("createdBy", "fullName role")
       .populate("items.productId", "name model barcode baseUnit");
 
@@ -591,6 +705,310 @@ exports.searchSaleProducts = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
 
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getTopSaleProductsStats = async (req, res) => {
+  try {
+    const { days, limit } = req.query;
+
+    let normalizedDays = Number(days);
+    if (!Number.isInteger(normalizedDays) || normalizedDays <= 0) {
+      normalizedDays = 30;
+    }
+    normalizedDays = Math.min(normalizedDays, 365);
+
+    let normalizedLimit = Number(limit);
+    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
+      normalizedLimit = 20;
+    }
+    normalizedLimit = Math.min(normalizedLimit, 100);
+
+    const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(
+      await resolveWarehouseForSale(req.user, null),
+    );
+
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - normalizedDays);
+
+    const top = await Sale.aggregate([
+      {
+        $match: {
+          warehouseId: new mongoose.Types.ObjectId(shopWarehouse._id),
+          createdAt: { $gte: fromDate },
+        },
+      },
+      { $unwind: "$items" },
+      {
+        $group: {
+          _id: "$items.productId",
+          soldQuantity: { $sum: "$items.quantity" },
+          soldAmount: { $sum: "$items.total" },
+          salesCount: { $sum: 1 },
+        },
+      },
+      { $sort: { soldQuantity: -1, soldAmount: -1 } },
+      { $limit: normalizedLimit },
+    ]);
+
+    if (top.length === 0) {
+      return res.json({
+        warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+        periodDays: normalizedDays,
+        total: 0,
+        items: [],
+      });
+    }
+
+    const productIds = top.map((x) => x._id);
+    const [products, stocks] = await Promise.all([
+      Product.find({ _id: { $in: productIds }, isActive: true })
+        .select("name model barcode baseUnit sellPrice wholesalePrice blockSellPrice hasPackage packageQuantity")
+        .lean(),
+      Stock.find({ warehouseId: shopWarehouse._id, productId: { $in: productIds } })
+        .select("productId quantity")
+        .lean(),
+    ]);
+
+    const productMap = new Map(products.map((p) => [String(p._id), p]));
+    const stockMap = new Map(stocks.map((s) => [String(s.productId), Number(s.quantity || 0)]));
+
+    const items = top
+      .map((row) => {
+        const product = productMap.get(String(row._id));
+        if (!product) return null;
+        return {
+          product,
+          soldQuantity: Number(row.soldQuantity || 0),
+          soldAmount: round2(row.soldAmount || 0),
+          salesCount: Number(row.salesCount || 0),
+          stockQuantity: stockMap.get(String(row._id)) || 0,
+        };
+      })
+      .filter(Boolean);
+
+    return res.json({
+      warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+      periodDays: normalizedDays,
+      total: items.length,
+      items,
+    });
+  } catch (error) {
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("required") ||
+      error.message.includes("Assign shopId") ||
+      error.message.includes("not found") ||
+      error.message.includes("allowed")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getTopProductsAvailable = async (req, res) => {
+  try {
+    const { q, limit } = req.query;
+
+    let normalizedLimit = Number(limit);
+    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
+      normalizedLimit = 100;
+    }
+    normalizedLimit = Math.min(normalizedLimit, 500);
+
+    const warehouseId = await resolveWarehouseForSale(req.user, null);
+    const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+
+    const search = String(q || "").trim();
+    const searchRegex = search ? new RegExp(escapeRegex(search), "i") : null;
+
+    const stocks = await Stock.find({ warehouseId: shopWarehouse._id })
+      .populate({
+        path: "productId",
+        select:
+          "name model barcode baseUnit sellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
+        match: searchRegex
+          ? {
+              isActive: true,
+              $or: [{ name: searchRegex }, { model: searchRegex }, { barcode: searchRegex }],
+            }
+          : { isActive: true },
+      })
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const items = stocks
+      .filter((s) => s.productId)
+      .slice(0, normalizedLimit)
+      .map((s) => ({
+        product: s.productId,
+        stockQuantity: Number(s.quantity || 0),
+        canSell: Number(s.quantity || 0) > 0,
+      }));
+
+    return res.json({
+      warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+      total: items.length,
+      items,
+    });
+  } catch (error) {
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("required") ||
+      error.message.includes("Assign shopId") ||
+      error.message.includes("not found") ||
+      error.message.includes("allowed")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.setQuickSaleProducts = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { productIds } = req.body;
+
+    if (!Array.isArray(productIds)) {
+      return res.status(400).json({ message: "productIds must be an array" });
+    }
+
+    const deduped = [];
+    const seen = new Set();
+    for (const id of productIds) {
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid productId in productIds" });
+      }
+      const key = String(id);
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(key);
+      }
+    }
+
+    if (deduped.length > 50) {
+      return res.status(400).json({ message: "Maximum 50 quick products allowed" });
+    }
+
+    let shopId;
+    let warehouseId;
+
+    await session.withTransaction(async () => {
+      const resolved = await resolveShopForSale(req.user, session);
+      shopId = resolved.shop._id;
+      warehouseId = resolved.warehouseId;
+
+      const existingProducts = await Product.find({ _id: { $in: deduped }, isActive: true })
+        .select("_id")
+        .session(session)
+        .lean();
+      if (existingProducts.length !== deduped.length) {
+        throw new Error("Some productIds are invalid or inactive");
+      }
+
+      if (deduped.length > 0) {
+        const existingStocks = await Stock.find({
+          warehouseId,
+          productId: { $in: deduped },
+        })
+          .select("productId")
+          .session(session)
+          .lean();
+        if (existingStocks.length !== deduped.length) {
+          throw new Error("Some productIds are not found in this warehouse stock");
+        }
+      }
+
+      await ShopQuickProduct.deleteMany({ shopId }).session(session);
+
+      if (deduped.length > 0) {
+        const docs = deduped.map((productId, index) => ({
+          shopId,
+          productId,
+          order: index,
+          isActive: true,
+          createdBy: req.user._id,
+        }));
+        await ShopQuickProduct.insertMany(docs, { session });
+      }
+    });
+
+    return res.json({
+      message: "Quick sale products updated successfully",
+      warehouseId,
+      total: deduped.length,
+      productIds: deduped,
+    });
+  } catch (error) {
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("required") ||
+      error.message.includes("Maximum") ||
+      error.message.includes("inactive") ||
+      error.message.includes("Assign shopId")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    return res.status(500).json({ message: error.message });
+  } finally {
+    await session.endSession();
+  }
+};
+
+exports.getQuickSaleProducts = async (req, res) => {
+  try {
+    const { shop, warehouseId } = await resolveShopForSale(req.user);
+    const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+
+    const quickRows = await ShopQuickProduct.find({ shopId: shop._id, isActive: true })
+      .sort({ order: 1, createdAt: 1 })
+      .populate(
+        "productId",
+        "name model barcode baseUnit sellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
+      )
+      .lean();
+
+    const productIds = quickRows
+      .map((r) => r.productId?._id)
+      .filter(Boolean)
+      .map((id) => String(id));
+
+    const stocks = await Stock.find({
+      warehouseId: shopWarehouse._id,
+      productId: { $in: productIds },
+    })
+      .select("productId quantity")
+      .lean();
+    const stockMap = new Map(stocks.map((s) => [String(s.productId), Number(s.quantity || 0)]));
+
+    const items = quickRows
+      .filter((r) => r.productId && r.productId.isActive)
+      .map((row) => ({
+        product: row.productId,
+        stockQuantity: stockMap.get(String(row.productId._id)) || 0,
+        canSell: (stockMap.get(String(row.productId._id)) || 0) > 0,
+      }));
+
+    return res.json({
+      shop: { _id: shop._id, name: shop.name },
+      warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+      total: items.length,
+      items,
+    });
+  } catch (error) {
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("required") ||
+      error.message.includes("Assign shopId") ||
+      error.message.includes("not found") ||
+      error.message.includes("allowed")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
     return res.status(500).json({ message: error.message });
   }
 };

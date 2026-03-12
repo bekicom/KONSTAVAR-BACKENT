@@ -16,6 +16,7 @@ const categoryController = require("../controllers/categoryController");
 const inventoryController = require("../controllers/inventoryController");
 const saleController = require("../controllers/saleController");
 const shopController = require("../controllers/shopController");
+const clientController = require("../controllers/clientController");
 
 
 // Admin create (faqat 1 marta)
@@ -94,6 +95,55 @@ router.delete(
   authMiddleware,
   roleMiddleware("admin"),
   userController.deleteUser,
+);
+
+router.post(
+  "/clients",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.createClient,
+);
+
+router.get(
+  "/clients",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.getClients,
+);
+
+router.get(
+  "/clients/:id",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.getClientById,
+);
+
+router.put(
+  "/clients/:id",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.updateClient,
+);
+
+router.post(
+  "/clients/:id/payments",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.addClientPayment,
+);
+
+router.get(
+  "/client-payments",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.getClientPayments,
+);
+
+router.get(
+  "/clients/:id/ledger",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  clientController.getClientLedger,
 );
 
 router.post(
@@ -333,7 +383,7 @@ router.delete(
 router.post(
   "/purchase",
   authMiddleware,
-  roleMiddleware("warehouse"),
+  roleMiddleware("admin", "warehouse"),
   purchaseController.createPurchase,
 );
 
@@ -475,6 +525,41 @@ router.get(
   authMiddleware,
   roleMiddleware("admin", "cashier"),
   saleController.searchSaleProducts,
+);
+
+router.get(
+  "/sales/top-products",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getQuickSaleProducts,
+);
+
+router.get(
+  "/sales/top-products/stats",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getTopSaleProductsStats,
+);
+
+router.get(
+  "/sales/top-products/available",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getTopProductsAvailable,
+);
+
+router.get(
+  "/sales/quick-products",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getQuickSaleProducts,
+);
+
+router.put(
+  "/sales/quick-products",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.setQuickSaleProducts,
 );
 
 router.get(
