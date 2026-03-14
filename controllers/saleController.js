@@ -9,6 +9,8 @@ const ShopQuickProduct = require("../models/ShopQuickProduct");
 const Client = require("../models/Client");
 
 const round2 = (value) => Number(Number(value).toFixed(2));
+const getSaleInitialPaidAmount = (sale) =>
+  round2(Number(sale?.cashAmount || 0) + Number(sale?.cardAmount || 0) + Number(sale?.clickAmount || 0));
 
 const toDate = (value, endOfDay = false) => {
   if (!value) return null;
@@ -1304,12 +1306,46 @@ exports.deleteSale = async (req, res) => {
         throw new Error("Sale not found");
       }
 
+      const manualCreditPayments = round2(Number(sale.paidAmount || 0) - getSaleInitialPaidAmount(sale));
+      if (sale.paymentType === "credit" && manualCreditPayments > 0) {
+        throw new Error("Cannot delete credit sale with client payments applied");
+      }
+
+      const saleReturns = await SaleReturn.find({ saleId: sale._id }).session(session);
+      const returnedByProduct = new Map();
+
+      for (const saleReturn of saleReturns) {
+        for (const item of saleReturn.items || []) {
+          const key = String(item.productId);
+          returnedByProduct.set(
+            key,
+            round2((returnedByProduct.get(key) || 0) + Number(item.returnQuantity || 0)),
+          );
+        }
+      }
+
       for (const item of sale.items) {
+        const restoredQuantity = round2(
+          Number(item.quantity || 0) - (returnedByProduct.get(String(item.productId)) || 0),
+        );
+
+        if (restoredQuantity < 0) {
+          throw new Error("Sale return quantity is invalid for this sale");
+        }
+
+        if (restoredQuantity === 0) {
+          continue;
+        }
+
         await Stock.findOneAndUpdate(
           { productId: item.productId, warehouseId: sale.warehouseId },
-          { $inc: { quantity: item.quantity } },
+          { $inc: { quantity: restoredQuantity } },
           { upsert: true, setDefaultsOnInsert: true, session },
         );
+      }
+
+      if (saleReturns.length > 0) {
+        await SaleReturn.deleteMany({ saleId: sale._id }).session(session);
       }
 
       await Sale.findByIdAndDelete(id).session(session);
@@ -1319,6 +1355,10 @@ exports.deleteSale = async (req, res) => {
   } catch (error) {
     if (error.message.includes("not found")) {
       return res.status(404).json({ message: error.message });
+    }
+
+    if (error.message.includes("Cannot delete") || error.message.includes("invalid")) {
+      return res.status(400).json({ message: error.message });
     }
 
     res.status(500).json({ message: error.message });

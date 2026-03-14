@@ -36,7 +36,8 @@ exports.createSupplierReturn = async (req, res) => {
       const processedItems = [];
 
       for (const item of items) {
-        const { productId, inputType, inputQuantity, unitReturnPrice } = item;
+        const { productId, inputType, unitReturnPrice } = item;
+        const inputQuantity = Number(item?.inputQuantity);
 
         if (!mongoose.Types.ObjectId.isValid(productId)) {
           throw new Error("Invalid productId");
@@ -67,8 +68,9 @@ exports.createSupplierReturn = async (req, res) => {
           throw new Error("Insufficient stock for return");
         }
 
-        const normalizedUnitReturnPrice = Number(unitReturnPrice) > 0
-          ? Number(unitReturnPrice)
+        const requestedUnitReturnPrice = Number(unitReturnPrice);
+        const normalizedUnitReturnPrice = requestedUnitReturnPrice > 0
+          ? requestedUnitReturnPrice
           : Number(product.purchasePrice);
 
         if (!Number.isFinite(normalizedUnitReturnPrice) || normalizedUnitReturnPrice <= 0) {

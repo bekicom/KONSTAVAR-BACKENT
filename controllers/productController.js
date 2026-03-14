@@ -2,6 +2,14 @@ const Product = require("../models/Product");
 const mongoose = require("mongoose");
 const Category = require("../models/Category");
 const Stock = require("../models/Stock");
+const Purchase = require("../models/Purchase");
+const Sale = require("../models/Sale");
+const SaleReturn = require("../models/SaleReturn");
+const SupplierReturn = require("../models/SupplierReturn");
+const Writeoff = require("../models/Writeoff");
+const InventorySession = require("../models/InventorySession");
+const ShopQuickProduct = require("../models/ShopQuickProduct");
+const ShopTransfer = require("../models/ShopTransfer");
 
 // 🔹 CREATE
 exports.createProduct = async (req, res) => {
@@ -181,12 +189,34 @@ exports.updateProduct = async (req, res) => {
 exports.deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid product ID" });
+    }
 
-    const product = await Product.findByIdAndDelete(id);
-
+    const product = await Product.findById(id);
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
+
+    const references = await Promise.all([
+      Stock.exists({ productId: id, quantity: { $gt: 0 } }),
+      Purchase.exists({ "items.productId": id }),
+      Sale.exists({ "items.productId": id }),
+      SaleReturn.exists({ "items.productId": id }),
+      SupplierReturn.exists({ "items.productId": id }),
+      Writeoff.exists({ "items.productId": id }),
+      InventorySession.exists({ "items.productId": id }),
+      ShopQuickProduct.exists({ productId: id }),
+      ShopTransfer.exists({ "items.productId": id }),
+    ]);
+
+    if (references.some(Boolean)) {
+      return res.status(400).json({
+        message: "Product has stock or history. Set isActive=false instead of delete",
+      });
+    }
+
+    await Product.findByIdAndDelete(id);
 
     res.json({
       message: "Product deleted successfully",

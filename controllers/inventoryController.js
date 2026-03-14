@@ -200,12 +200,13 @@ exports.updateInventoryCount = async (req, res) => {
 
     for (const incoming of items) {
       const { productId, countedQty, reason } = incoming;
+      const normalizedCountedQty = Number(countedQty);
 
       if (!mongoose.Types.ObjectId.isValid(productId)) {
         return res.status(400).json({ message: "Invalid productId in items" });
       }
 
-      if (!Number.isFinite(countedQty) || countedQty < 0) {
+      if (!Number.isFinite(normalizedCountedQty) || normalizedCountedQty < 0) {
         return res.status(400).json({ message: "countedQty must be a non-negative number" });
       }
 
@@ -229,7 +230,7 @@ exports.updateInventoryCount = async (req, res) => {
         map.set(String(productId), item);
       }
 
-      item.countedQty = Number(countedQty);
+      item.countedQty = normalizedCountedQty;
       item.difference = Number((item.countedQty - item.systemQty).toFixed(2));
       item.reason = typeof reason === "string" ? reason.trim() : item.reason || "";
       item.countedAt = new Date();

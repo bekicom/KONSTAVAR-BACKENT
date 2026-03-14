@@ -30,7 +30,8 @@ exports.createWriteoff = async (req, res) => {
       let totalAmount = 0;
 
       for (const item of items) {
-        const { productId, inputType, inputQuantity, unitCost } = item;
+        const { productId, inputType, unitCost } = item;
+        const inputQuantity = Number(item?.inputQuantity);
 
         if (!mongoose.Types.ObjectId.isValid(productId)) {
           throw new Error("Invalid productId");
@@ -59,7 +60,8 @@ exports.createWriteoff = async (req, res) => {
         if (!stock) throw new Error("Stock not found for product in this warehouse");
         if (stock.quantity < quantity) throw new Error("Insufficient stock for writeoff");
 
-        const normalizedUnitCost = Number(unitCost) > 0 ? Number(unitCost) : Number(product.purchasePrice);
+        const requestedUnitCost = Number(unitCost);
+        const normalizedUnitCost = requestedUnitCost > 0 ? requestedUnitCost : Number(product.purchasePrice);
         if (!Number.isFinite(normalizedUnitCost) || normalizedUnitCost <= 0) {
           throw new Error("unitCost must be a positive number");
         }

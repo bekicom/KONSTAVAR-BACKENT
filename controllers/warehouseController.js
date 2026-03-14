@@ -1,4 +1,15 @@
+const mongoose = require("mongoose");
 const Warehouse = require("../models/Warehouse");
+const Stock = require("../models/Stock");
+const Purchase = require("../models/Purchase");
+const SupplierReturn = require("../models/SupplierReturn");
+const Writeoff = require("../models/Writeoff");
+const InventorySession = require("../models/InventorySession");
+const Sale = require("../models/Sale");
+const SaleReturn = require("../models/SaleReturn");
+const ClientPayment = require("../models/ClientPayment");
+const ShopTransfer = require("../models/ShopTransfer");
+const Shop = require("../models/Shop");
 
 // 🔹 CREATE
 exports.createWarehouse = async (req, res) => {
@@ -38,6 +49,9 @@ exports.getWarehouses = async (req, res) => {
 exports.getWarehouseById = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid warehouse ID" });
+    }
 
     const warehouse = await Warehouse.findById(id);
     if (!warehouse) {
@@ -54,6 +68,9 @@ exports.getWarehouseById = async (req, res) => {
 exports.updateWarehouse = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid warehouse ID" });
+    }
 
     const warehouse = await Warehouse.findByIdAndUpdate(id, req.body, {
       new: true,
@@ -76,12 +93,37 @@ exports.updateWarehouse = async (req, res) => {
 exports.deleteWarehouse = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid warehouse ID" });
+    }
 
-    const warehouse = await Warehouse.findByIdAndDelete(id);
-
+    const warehouse = await Warehouse.findById(id);
     if (!warehouse) {
       return res.status(404).json({ message: "Warehouse not found" });
     }
+
+    const references = await Promise.all([
+      Stock.exists({ warehouseId: id, quantity: { $gt: 0 } }),
+      Purchase.exists({ warehouseId: id }),
+      SupplierReturn.exists({ warehouseId: id }),
+      Writeoff.exists({ warehouseId: id }),
+      InventorySession.exists({ warehouseId: id }),
+      Sale.exists({ warehouseId: id }),
+      SaleReturn.exists({ warehouseId: id }),
+      ClientPayment.exists({ warehouseId: id }),
+      ShopTransfer.exists({
+        $or: [{ sourceWarehouseId: id }, { destinationWarehouseId: id }],
+      }),
+      Shop.exists({ warehouseId: id }),
+    ]);
+
+    if (references.some(Boolean)) {
+      return res.status(400).json({
+        message: "Warehouse has stock, shop link or history. It cannot be deleted",
+      });
+    }
+
+    await Warehouse.findByIdAndDelete(id);
 
     res.json({
       message: "Warehouse deleted successfully",

@@ -6,6 +6,21 @@ const Warehouse = require("../models/Warehouse");
 const Supplier = require("../models/Supplier");
 const Category = require("../models/Category");
 
+const toNumberOrNaN = (value) => {
+  const normalized = Number(value);
+  return Number.isFinite(normalized) ? normalized : Number.NaN;
+};
+
+const toBoolean = (value) => {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+
+  return Boolean(value);
+};
+
 exports.createPurchase = async (req, res) => {
   const session = await mongoose.startSession();
 
@@ -87,8 +102,14 @@ exports.createPurchase = async (req, res) => {
           wholesalePrice,
           blockSellPrice,
           inputType,
-          inputQuantity,
         } = item;
+        const inputQuantity = toNumberOrNaN(item?.inputQuantity);
+        const normalizedPackageQuantity = toNumberOrNaN(packageQuantity);
+        const normalizedPurchasePrice = toNumberOrNaN(purchasePrice);
+        const normalizedBlockPurchasePrice = toNumberOrNaN(blockPurchasePrice);
+        const normalizedSellPrice = toNumberOrNaN(sellPrice);
+        const normalizedWholesalePrice = toNumberOrNaN(wholesalePrice);
+        const normalizedBlockSellPrice = toNumberOrNaN(blockSellPrice);
 
         let resolvedCategoryId = null;
         if (categoryId) {
@@ -150,13 +171,15 @@ exports.createPurchase = async (req, res) => {
             throw new Error("New product requires at least name and sellPrice");
           }
 
-          hasPackage = Boolean(hasPackage);
-          if (hasPackage && (!packageQuantity || packageQuantity <= 0)) {
+          hasPackage = toBoolean(hasPackage);
+          if (hasPackage && (!Number.isFinite(normalizedPackageQuantity) || normalizedPackageQuantity <= 0)) {
             throw new Error("packageQuantity must be positive when hasPackage=true");
           }
 
-          if (hasPackage && blockPurchasePrice > 0) {
-            purchasePrice = blockPurchasePrice / packageQuantity;
+          if (hasPackage && normalizedBlockPurchasePrice > 0) {
+            purchasePrice = normalizedBlockPurchasePrice / normalizedPackageQuantity;
+          } else {
+            purchasePrice = normalizedPurchasePrice;
           }
 
           if (!Number.isFinite(purchasePrice) || purchasePrice <= 0) {
@@ -171,12 +194,12 @@ exports.createPurchase = async (req, res) => {
                 categoryId: resolvedCategoryId,
                 barcode,
                 hasPackage,
-                packageQuantity: hasPackage ? packageQuantity : null,
+                packageQuantity: hasPackage ? normalizedPackageQuantity : null,
                 purchasePrice,
-                blockPurchasePrice: hasPackage ? blockPurchasePrice || null : null,
-                sellPrice,
-                wholesalePrice,
-                blockSellPrice,
+                blockPurchasePrice: hasPackage && normalizedBlockPurchasePrice > 0 ? normalizedBlockPurchasePrice : null,
+                sellPrice: normalizedSellPrice,
+                wholesalePrice: Number.isFinite(normalizedWholesalePrice) && normalizedWholesalePrice > 0 ? normalizedWholesalePrice : null,
+                blockSellPrice: Number.isFinite(normalizedBlockSellPrice) && normalizedBlockSellPrice > 0 ? normalizedBlockSellPrice : null,
               },
             ],
             { session },
@@ -214,37 +237,37 @@ exports.createPurchase = async (req, res) => {
 
         if (!product.isNew) {
           if (strategy !== "old") {
-            if (!Number.isFinite(sellPrice) || sellPrice <= 0) {
+            if (!Number.isFinite(normalizedSellPrice) || normalizedSellPrice <= 0) {
               throw new Error("sellPrice must be a positive number when strategy is new/average");
             }
           }
 
           if (strategy === "new") {
-            product.sellPrice = sellPrice;
+            product.sellPrice = normalizedSellPrice;
           }
 
           if (strategy === "average") {
             if (previousQuantity <= 0) {
-              product.sellPrice = sellPrice;
+              product.sellPrice = normalizedSellPrice;
             } else {
               const weightedSellPrice =
-                (product.sellPrice * previousQuantity + sellPrice * quantity) /
+                (product.sellPrice * previousQuantity + normalizedSellPrice * quantity) /
                 (previousQuantity + quantity);
               product.sellPrice = Number(weightedSellPrice.toFixed(2));
             }
           }
         }
 
-        if (Number.isFinite(wholesalePrice) && wholesalePrice > 0) {
-          product.wholesalePrice = wholesalePrice;
+        if (Number.isFinite(normalizedWholesalePrice) && normalizedWholesalePrice > 0) {
+          product.wholesalePrice = normalizedWholesalePrice;
         }
-        if (Number.isFinite(blockSellPrice) && blockSellPrice > 0) {
-          product.blockSellPrice = blockSellPrice;
+        if (Number.isFinite(normalizedBlockSellPrice) && normalizedBlockSellPrice > 0) {
+          product.blockSellPrice = normalizedBlockSellPrice;
         }
 
         let unitPurchasePrice = Number(purchasePrice);
         if (!Number.isFinite(unitPurchasePrice) || unitPurchasePrice <= 0) {
-          const blockPrice = Number(blockPurchasePrice);
+          const blockPrice = normalizedBlockPurchasePrice;
           if (
             Number.isFinite(blockPrice) &&
             blockPrice > 0 &&
@@ -263,11 +286,11 @@ exports.createPurchase = async (req, res) => {
 
         product.purchasePrice = Number(unitPurchasePrice.toFixed(2));
         if (
-          Number.isFinite(Number(blockPurchasePrice)) &&
-          Number(blockPurchasePrice) > 0 &&
+          Number.isFinite(normalizedBlockPurchasePrice) &&
+          normalizedBlockPurchasePrice > 0 &&
           product.hasPackage
         ) {
-          product.blockPurchasePrice = Number(blockPurchasePrice);
+          product.blockPurchasePrice = normalizedBlockPurchasePrice;
         }
         await product.save({ session });
 

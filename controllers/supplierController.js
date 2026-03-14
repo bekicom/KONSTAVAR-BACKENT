@@ -155,6 +155,7 @@ exports.addSupplierPayment = async (req, res) => {
   try {
     const { id } = req.params;
     const { amount, paymentDate, note } = req.body;
+    const normalizedAmount = Number(amount);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid supplier ID" });
@@ -165,13 +166,13 @@ exports.addSupplierPayment = async (req, res) => {
       return res.status(404).json({ message: "Supplier not found" });
     }
 
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
       return res.status(400).json({ message: "amount must be a positive number" });
     }
 
     const payment = await SupplierPayment.create({
       supplierId: id,
-      amount,
+      amount: normalizedAmount,
       paymentDate: paymentDate || new Date(),
       note,
       createdBy: req.user._id,
@@ -235,19 +236,20 @@ exports.updateSupplierPayment = async (req, res) => {
   try {
     const { paymentId } = req.params;
     const { amount, paymentDate, note } = req.body;
+    const normalizedAmount = amount !== undefined ? Number(amount) : undefined;
 
     if (!mongoose.Types.ObjectId.isValid(paymentId)) {
       return res.status(400).json({ message: "Invalid payment ID" });
     }
 
-    if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) {
+    if (amount !== undefined && (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0)) {
       return res.status(400).json({ message: "amount must be a positive number" });
     }
 
     const payment = await SupplierPayment.findByIdAndUpdate(
       paymentId,
       {
-        amount,
+        amount: normalizedAmount,
         paymentDate,
         note,
       },

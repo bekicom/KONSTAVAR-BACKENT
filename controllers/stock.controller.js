@@ -6,12 +6,13 @@ const Product = require("../models/Product");
 exports.createStock = async (req, res) => {
   try {
     const { productId, warehouseId, quantity } = req.body;
+    const normalizedQuantity = Number(quantity);
 
     if (!mongoose.Types.ObjectId.isValid(productId) || !mongoose.Types.ObjectId.isValid(warehouseId)) {
       return res.status(400).json({ message: "Invalid productId or warehouseId" });
     }
 
-    if (!Number.isFinite(quantity) || quantity < 0) {
+    if (!Number.isFinite(normalizedQuantity) || normalizedQuantity < 0) {
       return res.status(400).json({ message: "quantity must be a non-negative number" });
     }
 
@@ -32,7 +33,7 @@ exports.createStock = async (req, res) => {
       return res.status(409).json({ message: "Stock already exists for this product in warehouse" });
     }
 
-    const stock = await Stock.create({ productId, warehouseId, quantity });
+    const stock = await Stock.create({ productId, warehouseId, quantity: normalizedQuantity });
     res.status(201).json({ message: "Stock created successfully", stock });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -77,18 +78,19 @@ exports.updateStock = async (req, res) => {
   try {
     const { id } = req.params;
     const { quantity } = req.body;
+    const normalizedQuantity = Number(quantity);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid stock ID" });
     }
 
-    if (!Number.isFinite(quantity) || quantity < 0) {
+    if (!Number.isFinite(normalizedQuantity) || normalizedQuantity < 0) {
       return res.status(400).json({ message: "quantity must be a non-negative number" });
     }
 
     const stock = await Stock.findByIdAndUpdate(
       id,
-      { quantity },
+      { quantity: normalizedQuantity },
       { new: true, runValidators: true },
     )
       .populate("productId", "name model barcode baseUnit")
