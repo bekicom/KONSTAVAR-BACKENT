@@ -11,28 +11,57 @@ const InventorySession = require("../models/InventorySession");
 const ShopQuickProduct = require("../models/ShopQuickProduct");
 const ShopTransfer = require("../models/ShopTransfer");
 
+const resolveCategoryId = async ({ categoryId, categoryName, category }) => {
+  if (categoryId !== undefined && categoryId !== null && categoryId !== "") {
+    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+      throw new Error("Invalid category ID");
+    }
+
+    const categoryExists = await Category.findById(categoryId).select("_id");
+    if (!categoryExists) {
+      throw new Error("Category not found");
+    }
+
+    return categoryExists._id;
+  }
+
+  const incomingCategoryName = String(category?.name || categoryName || "").trim();
+  if (!incomingCategoryName) {
+    return null;
+  }
+
+  let existingCategory = await Category.findOne({ name: incomingCategoryName }).select("_id");
+  if (!existingCategory) {
+    existingCategory = await Category.create({
+      name: incomingCategoryName,
+      description: category?.description || "",
+    });
+  }
+
+  return existingCategory._id;
+};
+
 // 🔹 CREATE
 exports.createProduct = async (req, res) => {
   try {
-    const { categoryId } = req.body;
+    const resolvedCategoryId = await resolveCategoryId(req.body);
+    const payload = { ...req.body, categoryId: resolvedCategoryId };
+    delete payload.categoryName;
+    delete payload.category;
 
-    if (categoryId) {
-      if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-        return res.status(400).json({ message: "Invalid category ID" });
-      }
-      const categoryExists = await Category.exists({ _id: categoryId });
-      if (!categoryExists) {
-        return res.status(404).json({ message: "Category not found" });
-      }
-    }
-
-    const product = await Product.create(req.body);
+    const product = await Product.create(payload);
 
     res.status(201).json({
       message: "Product created successfully",
       product,
     });
   } catch (error) {
+    if (error.message.includes("Invalid category ID")) {
+      return res.status(400).json({ message: error.message });
+    }
+    if (error.message.includes("Category not found")) {
+      return res.status(404).json({ message: error.message });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -155,19 +184,19 @@ exports.getProductByBarcode = async (req, res) => {
 exports.updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
-    const { categoryId } = req.body;
 
-    if (categoryId) {
-      if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-        return res.status(400).json({ message: "Invalid category ID" });
-      }
-      const categoryExists = await Category.exists({ _id: categoryId });
-      if (!categoryExists) {
-        return res.status(404).json({ message: "Category not found" });
-      }
+    const payload = { ...req.body };
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, "categoryId") ||
+      Object.prototype.hasOwnProperty.call(req.body, "categoryName") ||
+      Object.prototype.hasOwnProperty.call(req.body, "category")
+    ) {
+      payload.categoryId = await resolveCategoryId(req.body);
     }
+    delete payload.categoryName;
+    delete payload.category;
 
-    const product = await Product.findByIdAndUpdate(id, req.body, {
+    const product = await Product.findByIdAndUpdate(id, payload, {
       new: true,
       runValidators: true,
     }).populate("categoryId", "name");
@@ -181,6 +210,12 @@ exports.updateProduct = async (req, res) => {
       product,
     });
   } catch (error) {
+    if (error.message.includes("Invalid category ID")) {
+      return res.status(400).json({ message: error.message });
+    }
+    if (error.message.includes("Category not found")) {
+      return res.status(404).json({ message: error.message });
+    }
     res.status(500).json({ message: error.message });
   }
 };

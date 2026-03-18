@@ -17,6 +17,7 @@ const inventoryController = require("../controllers/inventoryController");
 const saleController = require("../controllers/saleController");
 const shopController = require("../controllers/shopController");
 const clientController = require("../controllers/clientController");
+const dashboardController = require("../controllers/dashboardController");
 
 
 // Admin create (faqat 1 marta)
@@ -24,6 +25,13 @@ router.post("/create-admin", authController.createAdmin);
 
 // Login
 router.post("/login", authController.login);
+
+router.get(
+  "/dashboard",
+  authMiddleware,
+  roleMiddleware("admin"),
+  dashboardController.getDashboard,
+);
 
 // CREATE
 router.post(
