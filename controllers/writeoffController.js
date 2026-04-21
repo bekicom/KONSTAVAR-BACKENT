@@ -5,7 +5,7 @@ const Product = require("../models/Product");
 const Stock = require("../models/Stock");
 
 exports.createWriteoff = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { warehouseId, items, reason, note } = req.body;
@@ -22,7 +22,7 @@ exports.createWriteoff = async (req, res) => {
 
     let writeoffDoc;
 
-    await session.withTransaction(async () => {
+    {
       const warehouse = await Warehouse.findById(warehouseId).session(session);
       if (!warehouse) throw new Error("Warehouse not found");
 
@@ -97,7 +97,7 @@ exports.createWriteoff = async (req, res) => {
         { session },
       );
       [writeoffDoc] = created;
-    });
+    }
 
     res.status(201).json({
       message: "Writeoff created successfully",
@@ -115,8 +115,6 @@ exports.createWriteoff = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -212,7 +210,7 @@ exports.updateWriteoff = async (req, res) => {
 };
 
 exports.deleteWriteoff = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id } = req.params;
@@ -220,7 +218,7 @@ exports.deleteWriteoff = async (req, res) => {
       return res.status(400).json({ message: "Invalid writeoff ID" });
     }
 
-    await session.withTransaction(async () => {
+    {
       const writeoff = await Writeoff.findById(id).session(session);
       if (!writeoff) throw new Error("Writeoff not found");
 
@@ -233,7 +231,7 @@ exports.deleteWriteoff = async (req, res) => {
       }
 
       await Writeoff.findByIdAndDelete(id).session(session);
-    });
+    }
 
     res.json({ message: "Writeoff deleted successfully" });
   } catch (error) {
@@ -241,7 +239,5 @@ exports.deleteWriteoff = async (req, res) => {
       return res.status(404).json({ message: error.message });
     }
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };

@@ -167,7 +167,7 @@ exports.updateClient = async (req, res) => {
 };
 
 exports.addClientPayment = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id } = req.params;
@@ -182,7 +182,7 @@ exports.addClientPayment = async (req, res) => {
     const split = resolvePaymentSplit(paymentType, amount, cashAmount, cardAmount, clickAmount);
 
     let paymentDoc;
-    await session.withTransaction(async () => {
+    {
       const client = await Client.findById(id).session(session);
       if (!client) throw new Error("Client not found");
 
@@ -229,7 +229,7 @@ exports.addClientPayment = async (req, res) => {
         { session },
       );
       [paymentDoc] = createdPayments;
-    });
+    }
 
     const populated = await ClientPayment.findById(paymentDoc._id)
       .populate("clientId", "name phone")
@@ -249,8 +249,6 @@ exports.addClientPayment = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
     return res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 

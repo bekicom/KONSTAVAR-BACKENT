@@ -6,8 +6,6 @@ const Shop = require("../models/Shop");
 const ShopTransfer = require("../models/ShopTransfer");
 
 exports.createShop = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const { name, address } = req.body;
 
@@ -18,34 +16,28 @@ exports.createShop = async (req, res) => {
       return res.status(400).json({ message: "address is required" });
     }
 
+    const warehouseName = `${String(name).trim()} - Shop Warehouse`;
+    const [createdWarehouse] = await Warehouse.create([
+      {
+        name: warehouseName,
+        address: String(address).trim(),
+      },
+    ]);
+
     let shopDoc;
 
-    await session.withTransaction(async () => {
-      const warehouseName = `${String(name).trim()} - Shop Warehouse`;
-      const warehouse = await Warehouse.create(
-        [
-          {
-            name: warehouseName,
-            address: String(address).trim(),
-          },
-        ],
-        { session },
-      );
-
-      const [createdWarehouse] = warehouse;
-      const createdShops = await Shop.create(
-        [
-          {
-            name: String(name).trim(),
-            address: String(address).trim(),
-            warehouseId: createdWarehouse._id,
-          },
-        ],
-        { session },
-      );
-
-      [shopDoc] = createdShops;
-    });
+    try {
+      [shopDoc] = await Shop.create([
+        {
+          name: String(name).trim(),
+          address: String(address).trim(),
+          warehouseId: createdWarehouse._id,
+        },
+      ]);
+    } catch (shopError) {
+      await Warehouse.deleteOne({ _id: createdWarehouse._id });
+      throw shopError;
+    }
 
     const populatedShop = await Shop.findById(shopDoc._id).populate("warehouseId", "name address");
 
@@ -59,8 +51,6 @@ exports.createShop = async (req, res) => {
     }
 
     return res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -154,7 +144,7 @@ exports.updateShop = async (req, res) => {
 };
 
 exports.deleteShop = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id } = req.params;
@@ -162,7 +152,7 @@ exports.deleteShop = async (req, res) => {
       return res.status(400).json({ message: "Invalid shop ID" });
     }
 
-    await session.withTransaction(async () => {
+    {
       const shop = await Shop.findById(id).session(session);
       if (!shop) {
         throw new Error("Shop not found");
@@ -181,7 +171,7 @@ exports.deleteShop = async (req, res) => {
       await Shop.deleteOne({ _id: shop._id }).session(session);
       await Warehouse.deleteOne({ _id: shop.warehouseId }).session(session);
       await Stock.deleteMany({ warehouseId: shop.warehouseId }).session(session);
-    });
+    }
 
     return res.json({ message: "Shop deleted successfully" });
   } catch (error) {
@@ -192,13 +182,11 @@ exports.deleteShop = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
     return res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
 exports.transferToShop = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id: shopId } = req.params;
@@ -218,7 +206,7 @@ exports.transferToShop = async (req, res) => {
 
     let transferDoc;
 
-    await session.withTransaction(async () => {
+    {
       const shop = await Shop.findById(shopId).session(session);
       if (!shop) {
         throw new Error("Shop not found");
@@ -313,7 +301,7 @@ exports.transferToShop = async (req, res) => {
       );
 
       [transferDoc] = transfers;
-    });
+    }
 
     const populatedTransfer = await ShopTransfer.findById(transferDoc._id)
       .populate("sourceWarehouseId", "name")
@@ -340,8 +328,6 @@ exports.transferToShop = async (req, res) => {
     }
 
     return res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 

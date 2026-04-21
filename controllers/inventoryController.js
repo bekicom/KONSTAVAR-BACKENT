@@ -258,7 +258,7 @@ exports.updateInventoryCount = async (req, res) => {
 };
 
 exports.postInventorySession = async (req, res) => {
-  const dbSession = await mongoose.startSession();
+  const dbSession = undefined;
 
   try {
     const { id } = req.params;
@@ -270,7 +270,7 @@ exports.postInventorySession = async (req, res) => {
 
     let responseSessionId = null;
 
-    await dbSession.withTransaction(async () => {
+    {
       const inventory = await InventorySession.findById(id).session(dbSession);
       if (!inventory) throw new Error("Inventory session not found");
       if (inventory.status !== "draft") throw new Error("Only draft session can be posted");
@@ -313,7 +313,7 @@ exports.postInventorySession = async (req, res) => {
       await inventory.save({ session: dbSession });
 
       responseSessionId = inventory._id;
-    });
+    }
 
     const posted = await InventorySession.findById(responseSessionId)
       .populate("warehouseId", "name")
@@ -340,8 +340,6 @@ exports.postInventorySession = async (req, res) => {
     }
 
     res.status(500).json({ message: error.message });
-  } finally {
-    await dbSession.endSession();
   }
 };
 

@@ -197,7 +197,7 @@ const resolveShopForSale = async (user, session = null) => {
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 exports.createSale = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const {
@@ -225,7 +225,7 @@ exports.createSale = async (req, res) => {
 
     let saleDoc;
 
-    await session.withTransaction(async () => {
+    {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
       const normalizedPaymentType = paymentType || "cash";
@@ -442,7 +442,7 @@ exports.createSale = async (req, res) => {
       );
 
       [saleDoc] = createdSales;
-    });
+    }
 
     res.status(201).json({
       message: "Sale created successfully",
@@ -463,8 +463,6 @@ exports.createSale = async (req, res) => {
     }
 
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -870,7 +868,7 @@ exports.getTopProductsAvailable = async (req, res) => {
 };
 
 exports.setQuickSaleProducts = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { productIds } = req.body;
@@ -899,7 +897,7 @@ exports.setQuickSaleProducts = async (req, res) => {
     let shopId;
     let warehouseId;
 
-    await session.withTransaction(async () => {
+    {
       const resolved = await resolveShopForSale(req.user, session);
       shopId = resolved.shop._id;
       warehouseId = resolved.warehouseId;
@@ -937,7 +935,7 @@ exports.setQuickSaleProducts = async (req, res) => {
         }));
         await ShopQuickProduct.insertMany(docs, { session });
       }
-    });
+    }
 
     return res.json({
       message: "Quick sale products updated successfully",
@@ -956,8 +954,6 @@ exports.setQuickSaleProducts = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
     return res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -1105,7 +1101,7 @@ exports.searchSaleHistoryByBarcode = async (req, res) => {
 };
 
 exports.createSaleReturn = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const {
@@ -1128,7 +1124,7 @@ exports.createSaleReturn = async (req, res) => {
 
     let returnDoc;
 
-    await session.withTransaction(async () => {
+    {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
 
@@ -1226,7 +1222,7 @@ exports.createSaleReturn = async (req, res) => {
       );
 
       [returnDoc] = createdReturns;
-    });
+    }
 
     const populated = await SaleReturn.findById(returnDoc._id)
       .populate("saleId", "createdAt paymentType totalAmount")
@@ -1254,8 +1250,6 @@ exports.createSaleReturn = async (req, res) => {
     }
 
     return res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -1292,7 +1286,7 @@ exports.getSaleReturnsBySaleId = async (req, res) => {
 };
 
 exports.deleteSale = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id } = req.params;
@@ -1300,7 +1294,7 @@ exports.deleteSale = async (req, res) => {
       return res.status(400).json({ message: "Invalid sale ID" });
     }
 
-    await session.withTransaction(async () => {
+    {
       const sale = await Sale.findById(id).session(session);
       if (!sale) {
         throw new Error("Sale not found");
@@ -1349,7 +1343,7 @@ exports.deleteSale = async (req, res) => {
       }
 
       await Sale.findByIdAndDelete(id).session(session);
-    });
+    }
 
     res.json({ message: "Sale deleted successfully" });
   } catch (error) {
@@ -1362,7 +1356,5 @@ exports.deleteSale = async (req, res) => {
     }
 
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };

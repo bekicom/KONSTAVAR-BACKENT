@@ -34,3 +34,14 @@ const startServer = async () => {
 };
 
 startServer();
+
+const stopMemoryServer = connectDB.stopMemoryServer;
+const shutdown = async () => {
+  if (typeof stopMemoryServer === "function") {
+    await stopMemoryServer();
+  }
+  process.exit(0);
+};
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

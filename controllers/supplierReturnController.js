@@ -6,7 +6,7 @@ const Product = require("../models/Product");
 const Stock = require("../models/Stock");
 
 exports.createSupplierReturn = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { warehouseId, supplierId, items, note } = req.body;
@@ -23,7 +23,7 @@ exports.createSupplierReturn = async (req, res) => {
 
     let returnDoc;
 
-    await session.withTransaction(async () => {
+    {
       const [warehouse, supplier] = await Promise.all([
         Warehouse.findById(warehouseId).session(session),
         Supplier.findById(supplierId).session(session),
@@ -109,7 +109,7 @@ exports.createSupplierReturn = async (req, res) => {
       );
 
       [returnDoc] = created;
-    });
+    }
 
     res.status(201).json({
       message: "Supplier return created successfully",
@@ -127,8 +127,6 @@ exports.createSupplierReturn = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -187,7 +185,7 @@ exports.getSupplierReturnById = async (req, res) => {
 };
 
 exports.deleteSupplierReturn = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id } = req.params;
@@ -195,7 +193,7 @@ exports.deleteSupplierReturn = async (req, res) => {
       return res.status(400).json({ message: "Invalid supplier return ID" });
     }
 
-    await session.withTransaction(async () => {
+    {
       const supplierReturn = await SupplierReturn.findById(id).session(session);
       if (!supplierReturn) throw new Error("Supplier return not found");
 
@@ -208,7 +206,7 @@ exports.deleteSupplierReturn = async (req, res) => {
       }
 
       await SupplierReturn.findByIdAndDelete(id).session(session);
-    });
+    }
 
     res.json({ message: "Supplier return deleted successfully" });
   } catch (error) {
@@ -216,7 +214,5 @@ exports.deleteSupplierReturn = async (req, res) => {
       return res.status(404).json({ message: error.message });
     }
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };

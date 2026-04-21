@@ -22,7 +22,7 @@ const toBoolean = (value) => {
 };
 
 exports.createPurchase = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { warehouseId, items, supplierId, supplier, paymentType, paidAmount } = req.body;
@@ -47,7 +47,7 @@ exports.createPurchase = async (req, res) => {
 
     let purchaseDoc;
 
-    await session.withTransaction(async () => {
+    {
       let totalAmount = 0;
       const processedItems = [];
       let resolvedSupplier;
@@ -361,7 +361,7 @@ exports.createPurchase = async (req, res) => {
       );
 
       [purchaseDoc] = purchases;
-    });
+    }
 
     res.status(201).json({
       message: "Purchase created successfully",
@@ -385,8 +385,6 @@ exports.createPurchase = async (req, res) => {
     }
 
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
 
@@ -520,7 +518,7 @@ exports.updatePurchase = async (req, res) => {
 };
 
 exports.deletePurchase = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = undefined;
 
   try {
     const { id } = req.params;
@@ -528,7 +526,7 @@ exports.deletePurchase = async (req, res) => {
       return res.status(400).json({ message: "Invalid purchase ID" });
     }
 
-    await session.withTransaction(async () => {
+    {
       const purchase = await Purchase.findById(id).session(session);
       if (!purchase) {
         throw new Error("Purchase not found");
@@ -563,7 +561,7 @@ exports.deletePurchase = async (req, res) => {
       }
 
       await Purchase.findByIdAndDelete(id).session(session);
-    });
+    }
 
     res.json({ message: "Purchase deleted successfully" });
   } catch (error) {
@@ -579,7 +577,5 @@ exports.deletePurchase = async (req, res) => {
     }
 
     res.status(500).json({ message: error.message });
-  } finally {
-    await session.endSession();
   }
 };
