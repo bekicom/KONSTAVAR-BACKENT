@@ -18,6 +18,7 @@ const saleController = require("../controllers/saleController");
 const shopController = require("../controllers/shopController");
 const clientController = require("../controllers/clientController");
 const dashboardController = require("../controllers/dashboardController");
+const shiftController = require("../controllers/shiftController");
 
 
 // Admin create (faqat 1 marta)
@@ -25,6 +26,41 @@ router.post("/create-admin", authController.createAdmin);
 
 // Login
 router.post("/login", authController.login);
+
+router.get(
+  "/shifts/current",
+  authMiddleware,
+  roleMiddleware("cashier"),
+  shiftController.getCurrentShift,
+);
+
+router.post(
+  "/shifts/start",
+  authMiddleware,
+  roleMiddleware("cashier"),
+  shiftController.startShift,
+);
+
+router.post(
+  "/shifts/:id/close",
+  authMiddleware,
+  roleMiddleware("cashier", "admin"),
+  shiftController.closeShift,
+);
+
+router.get(
+  "/shifts",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  shiftController.getShifts,
+);
+
+router.get(
+  "/shifts/:id",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  shiftController.getShiftById,
+);
 
 router.get(
   "/dashboard",

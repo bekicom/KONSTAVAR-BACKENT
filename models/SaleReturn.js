@@ -74,6 +74,11 @@ const saleReturnSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+    shiftId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shift",
+      default: null,
+    },
   },
   { timestamps: true },
 );
@@ -81,5 +86,6 @@ const saleReturnSchema = new mongoose.Schema(
 saleReturnSchema.index({ saleId: 1, createdAt: -1 });
 saleReturnSchema.index({ warehouseId: 1, createdAt: -1 });
 saleReturnSchema.index({ createdBy: 1, createdAt: -1 });
+saleReturnSchema.index({ shiftId: 1, createdAt: -1 });
 
 module.exports = mongoose.model("SaleReturn", saleReturnSchema);

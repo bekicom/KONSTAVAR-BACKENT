@@ -91,6 +91,11 @@ const saleSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    shiftId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shift",
+      default: null,
+    },
     note: {
       type: String,
       trim: true,
@@ -107,5 +112,6 @@ const saleSchema = new mongoose.Schema(
 
 saleSchema.index({ warehouseId: 1, createdAt: -1 });
 saleSchema.index({ createdBy: 1, createdAt: -1 });
+saleSchema.index({ shiftId: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Sale", saleSchema);

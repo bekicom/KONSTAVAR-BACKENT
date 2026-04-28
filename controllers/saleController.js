@@ -7,6 +7,7 @@ const Warehouse = require("../models/Warehouse");
 const Shop = require("../models/Shop");
 const ShopQuickProduct = require("../models/ShopQuickProduct");
 const Client = require("../models/Client");
+const { requireOpenCashierShift, getOpenCashierShift } = require("../utils/shiftHelper");
 
 const round2 = (value) => Number(Number(value).toFixed(2));
 const getSaleInitialPaidAmount = (sale) =>
@@ -229,6 +230,7 @@ exports.createSale = async (req, res) => {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
       const normalizedPaymentType = paymentType || "cash";
+      const activeShift = req.user?.role === "cashier" ? await requireOpenCashierShift(req.user, session) : null;
 
       let resolvedClient = null;
       if (clientId) {
@@ -433,6 +435,7 @@ exports.createSale = async (req, res) => {
             clickAmount: payment.clickAmount,
             paidAmount: normalizedPaidAmount,
             dueAmount,
+            shiftId: activeShift ? activeShift._id : null,
             clientId: resolvedClient ? resolvedClient._id : null,
             note,
             createdBy: req.user._id,
@@ -468,12 +471,16 @@ exports.createSale = async (req, res) => {
 
 exports.getSales = async (req, res) => {
   try {
-    const { warehouseId, cashierId, paymentType, from, to, limit } = req.query;
+    const { warehouseId, cashierId, paymentType, from, to, limit, shiftId } = req.query;
     const query = {};
 
     if (req.user?.role === "cashier") {
-      const resolvedWarehouseId = await resolveWarehouseForSale(req.user, null);
-      query.warehouseId = resolvedWarehouseId;
+      const activeShift = await getOpenCashierShift(req.user);
+      if (!activeShift) {
+        return res.status(400).json({ message: "Open shift required" });
+      }
+      query.warehouseId = activeShift.warehouseId;
+      query.shiftId = activeShift._id;
     } else if (warehouseId) {
       if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
@@ -509,6 +516,13 @@ exports.getSales = async (req, res) => {
       query.paymentType = paymentType;
     }
 
+    if (shiftId && req.user?.role !== "cashier") {
+      if (!mongoose.Types.ObjectId.isValid(shiftId)) {
+        return res.status(400).json({ message: "Invalid shiftId query" });
+      }
+      query.shiftId = shiftId;
+    }
+
     const fromDate = toDate(from, false);
     const toDateValue = toDate(to, true);
 
@@ -540,6 +554,7 @@ exports.getSales = async (req, res) => {
       .populate("warehouseId", "name")
       .populate("clientId", "name phone")
       .populate("createdBy", "fullName role")
+      .populate("shiftId", "status openedAt closedAt")
       .populate("items.productId", "name model barcode");
 
     res.json(sales);
@@ -559,6 +574,7 @@ exports.getSaleById = async (req, res) => {
       .populate("warehouseId", "name")
       .populate("clientId", "name phone address")
       .populate("createdBy", "fullName role")
+      .populate("shiftId", "status openedAt closedAt")
       .populate("items.productId", "name model barcode baseUnit");
 
     if (!sale) {
@@ -1127,6 +1143,7 @@ exports.createSaleReturn = async (req, res) => {
     {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
+      const activeShift = req.user?.role === "cashier" ? await requireOpenCashierShift(req.user, session) : null;
 
       const sale = await Sale.findById(saleId).session(session);
       if (!sale) {
@@ -1216,6 +1233,7 @@ exports.createSaleReturn = async (req, res) => {
             clickAmount: refund.clickAmount,
             reason: reason || "",
             createdBy: req.user._id,
+            shiftId: activeShift ? activeShift._id : null,
           },
         ],
         { session },
@@ -1228,6 +1246,7 @@ exports.createSaleReturn = async (req, res) => {
       .populate("saleId", "createdAt paymentType totalAmount")
       .populate("warehouseId", "name")
       .populate("createdBy", "fullName role")
+      .populate("shiftId", "status openedAt closedAt")
       .populate("items.productId", "name model barcode baseUnit");
 
     return res.status(201).json({

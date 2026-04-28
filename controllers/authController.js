@@ -2,6 +2,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Shop = require("../models/Shop");
+const { getOpenCashierShift } = require("../utils/shiftHelper");
 
 // 🔹 ADMIN CREATE (faqat 1 marta)
 exports.createAdmin = async (req, res) => {
@@ -64,6 +65,8 @@ exports.login = async (req, res) => {
       { expiresIn: "7d" },
     );
 
+    const activeShift = user.role === "cashier" ? await getOpenCashierShift(user) : null;
+
     res.json({
       message: "Login successful",
       token,
@@ -74,6 +77,15 @@ exports.login = async (req, res) => {
         shopId: user.shopId?._id || null,
         shopWarehouseId: user.shopId?.warehouseId || null,
       },
+      activeShift: activeShift
+        ? {
+            id: activeShift._id,
+            status: activeShift.status,
+            openedAt: activeShift.openedAt,
+            shopId: activeShift.shopId,
+            warehouseId: activeShift.warehouseId,
+          }
+        : null,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
