@@ -24,12 +24,13 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST || "0.0.0.0";
 
 const startServer = async () => {
   await connectDB();
 
-  app.listen(PORT, () => {
-    console.log(`🚀 KONSTAVAR server running on port ${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`🚀 KONSTAVAR server running on ${HOST}:${PORT}`);
   });
 };
 

@@ -72,6 +72,24 @@ const productSchema = new mongoose.Schema(
       default: null,
     },
 
+    // 1 dona uchun mini narx
+    miniSellPrice: {
+      type: Number,
+      default: null,
+    },
+
+    // Omborda qolsa ogohlantirish beriladigan minimal miqdor
+    minStockQuantity: {
+      type: Number,
+      default: null,
+    },
+
+    // Qolgan stock shu darajaga tushganda tavsiya etiladigan buyurtma miqdori
+    reorderQuantity: {
+      type: Number,
+      default: null,
+    },
+
     // 1 blok sotish narxi
     blockSellPrice: {
       type: Number,

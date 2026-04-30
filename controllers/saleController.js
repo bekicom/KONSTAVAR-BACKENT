@@ -7,7 +7,9 @@ const Warehouse = require("../models/Warehouse");
 const Shop = require("../models/Shop");
 const ShopQuickProduct = require("../models/ShopQuickProduct");
 const Client = require("../models/Client");
-const { requireOpenCashierShift, getOpenCashierShift } = require("../utils/shiftHelper");
+const User = require("../models/User");
+const Shift = require("../models/Shift");
+const { requireOpenCashierShift, getOpenCashierShift, resolveCashierShop } = require("../utils/shiftHelper");
 
 const round2 = (value) => Number(Number(value).toFixed(2));
 const getSaleInitialPaidAmount = (sale) =>
@@ -196,6 +198,50 @@ const resolveShopForSale = async (user, session = null) => {
 };
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const resolveUnitSellPriceByType = (product, priceType, fallbackPrice) => {
+  const normalizedType = (priceType || "").trim().toLowerCase();
+
+  if (normalizedType === "mini" && Number(product.miniSellPrice) > 0) {
+    return { unitSellPrice: Number(product.miniSellPrice), priceType: "mini" };
+  }
+
+  if (normalizedType === "wholesale" && Number(product.wholesalePrice) > 0) {
+    return { unitSellPrice: Number(product.wholesalePrice), priceType: "wholesale" };
+  }
+
+  if (normalizedType === "retail" && Number(product.sellPrice) > 0) {
+    return { unitSellPrice: Number(product.sellPrice), priceType: "retail" };
+  }
+
+  if (normalizedType === "custom" || normalizedType === "") {
+    return { unitSellPrice: Number(fallbackPrice), priceType: normalizedType || "custom" };
+  }
+
+  throw new Error("Invalid priceType. Use 'retail', 'wholesale', 'mini' or 'custom'");
+};
+
+const buildReportRange = ({ date, from, to }) => {
+  if (date) {
+    const start = toDate(date, false);
+    const end = toDate(date, true);
+    if (!start || !end) {
+      throw new Error("Invalid date. Use YYYY-MM-DD");
+    }
+    return { from: start, to: end };
+  }
+
+  const start = from ? toDate(from, false) : null;
+  const end = to ? toDate(to, true) : null;
+
+  if ((from && !start) || (to && !end)) {
+    throw new Error("Invalid from/to date. Use YYYY-MM-DD or ISO date");
+  }
+
+  return {
+    from: start || new Date("1970-01-01T00:00:00.000Z"),
+    to: end || new Date(),
+  };
+};
 
 exports.createSale = async (req, res) => {
   const session = undefined;
@@ -212,6 +258,7 @@ exports.createSale = async (req, res) => {
       paidAmount,
       clientId,
       client,
+      shiftId: requestedShiftId,
       note,
     } = req.body;
 
@@ -230,7 +277,30 @@ exports.createSale = async (req, res) => {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
       const normalizedPaymentType = paymentType || "cash";
-      const activeShift = req.user?.role === "cashier" ? await requireOpenCashierShift(req.user, session) : null;
+      let activeShift = null;
+      if (req.user?.role === "cashier") {
+        if (requestedShiftId) {
+          if (!mongoose.Types.ObjectId.isValid(requestedShiftId)) {
+            throw new Error("Invalid shiftId");
+          }
+          const cashierShop = await resolveCashierShop(req.user, session);
+          activeShift = await Shift.findById(requestedShiftId).session(session);
+          if (!activeShift) {
+            throw new Error("Shift not found");
+          }
+          if (String(activeShift.cashierId) !== String(req.user._id)) {
+            throw new Error("Shift does not belong to this cashier");
+          }
+          if (String(activeShift.shopId) !== String(cashierShop._id)) {
+            throw new Error("Shift does not belong to cashier shop");
+          }
+          if (String(activeShift.warehouseId) !== String(warehouseId)) {
+            throw new Error("Shift warehouse does not match sale warehouse");
+          }
+        } else {
+          activeShift = await requireOpenCashierShift(req.user, session);
+        }
+      }
 
       let resolvedClient = null;
       if (clientId) {
@@ -265,8 +335,9 @@ exports.createSale = async (req, res) => {
 
       for (const item of items) {
         const { productId } = item;
-        const inputType = item.inputType || "unit";
-        const inputQuantity = Number(item.inputQuantity);
+      const inputType = item.inputType || "unit";
+      const inputQuantity = Number(item.inputQuantity);
+      let priceType = item.priceType || "custom";
 
         if (!mongoose.Types.ObjectId.isValid(productId)) {
           throw new Error("Invalid productId");
@@ -295,15 +366,24 @@ exports.createSale = async (req, res) => {
 
         let unitSellPrice = Number(item.unitSellPrice);
         if (!Number.isFinite(unitSellPrice) || unitSellPrice <= 0) {
-          if (inputType === "block" && Number(product.blockSellPrice) > 0 && product.packageQuantity > 0) {
+          const resolvedByType = resolveUnitSellPriceByType(product, priceType, product.sellPrice);
+          unitSellPrice = resolvedByType.unitSellPrice;
+          if (resolvedByType.priceType) {
+            priceType = resolvedByType.priceType;
+          }
+
+          if (
+            inputType === "block" &&
+            Number(product.blockSellPrice) > 0 &&
+            product.packageQuantity > 0 &&
+            (priceType === "custom" || priceType === "retail")
+          ) {
             unitSellPrice = Number(product.blockSellPrice) / product.packageQuantity;
-          } else {
-            unitSellPrice = Number(product.sellPrice);
           }
         }
 
         if (!Number.isFinite(unitSellPrice) || unitSellPrice <= 0) {
-          throw new Error("unitSellPrice must be a positive number");
+          throw new Error("unitSellPrice must be a positive number or valid priceType must be provided");
         }
 
         unitSellPrice = round2(unitSellPrice);
@@ -314,6 +394,7 @@ exports.createSale = async (req, res) => {
           productId: product._id,
           inputType,
           inputQuantity,
+          priceType,
           packageQuantity: product.packageQuantity || null,
           quantity,
           unitSellPrice,
@@ -469,6 +550,77 @@ exports.createSale = async (req, res) => {
   }
 };
 
+exports.getOfflineSaleCatalog = async (req, res) => {
+  try {
+    const { shop, warehouseId } = await resolveShopForSale(req.user);
+    const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+
+    const [stocks, quickRows] = await Promise.all([
+      Stock.find({ warehouseId: shopWarehouse._id })
+        .populate({
+          path: "productId",
+          select:
+            "name model barcode baseUnit sellPrice miniSellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
+          match: { isActive: true },
+        })
+        .sort({ updatedAt: -1 })
+        .lean(),
+      ShopQuickProduct.find({ shopId: shop._id, isActive: true })
+        .sort({ order: 1, createdAt: 1 })
+        .select("productId order")
+        .lean(),
+    ]);
+
+    const quickOrderMap = new Map(
+      quickRows
+        .filter((row) => row.productId)
+        .map((row) => [String(row.productId), Number(row.order || 0)]),
+    );
+
+    const items = stocks
+      .filter((stock) => stock.productId)
+      .map((stock) => {
+        const productId = String(stock.productId._id);
+        return {
+          product: stock.productId,
+          stockQuantity: Number(stock.quantity || 0),
+          canSell: Number(stock.quantity || 0) > 0,
+          isQuick: quickOrderMap.has(productId),
+          quickOrder: quickOrderMap.has(productId) ? quickOrderMap.get(productId) : null,
+        };
+      })
+      .sort((a, b) => {
+        const quickDiff = Number(b.isQuick) - Number(a.isQuick);
+        if (quickDiff !== 0) return quickDiff;
+        if (a.isQuick && b.isQuick) {
+          return Number(a.quickOrder || 0) - Number(b.quickOrder || 0);
+        }
+        return String(a.product?.name || "").localeCompare(String(b.product?.name || ""));
+      });
+
+    return res.json({
+      shop: { _id: shop._id, name: shop.name },
+      warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+      total: items.length,
+      quickProductIds: quickRows
+        .filter((row) => row.productId)
+        .map((row) => String(row.productId)),
+      items,
+    });
+  } catch (error) {
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("required") ||
+      error.message.includes("Assign shopId") ||
+      error.message.includes("not found") ||
+      error.message.includes("allowed")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 exports.getSales = async (req, res) => {
   try {
     const { warehouseId, cashierId, paymentType, from, to, limit, shiftId } = req.query;
@@ -560,6 +712,347 @@ exports.getSales = async (req, res) => {
     res.json(sales);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getSalesHistory = async (req, res) => {
+  try {
+    const {
+      date,
+      from,
+      to,
+      warehouseId,
+      cashierId,
+      shopId,
+      limit = 50,
+      topLimit = 10,
+    } = req.query;
+
+    const range = buildReportRange({ date, from, to });
+    const query = {
+      createdAt: { $gte: range.from, $lte: range.to },
+    };
+
+    if (warehouseId) {
+      if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
+        return res.status(400).json({ message: "Invalid warehouseId query" });
+      }
+      query.warehouseId = new mongoose.Types.ObjectId(warehouseId);
+    }
+
+    if (cashierId) {
+      if (!mongoose.Types.ObjectId.isValid(cashierId)) {
+        return res.status(400).json({ message: "Invalid cashierId query" });
+      }
+      query.createdBy = new mongoose.Types.ObjectId(cashierId);
+    }
+
+    if (shopId) {
+      if (!mongoose.Types.ObjectId.isValid(shopId)) {
+        return res.status(400).json({ message: "Invalid shopId query" });
+      }
+      const shop = await Shop.findById(shopId).select("warehouseId").lean();
+      if (!shop) {
+        return res.status(404).json({ message: "Shop not found" });
+      }
+      query.warehouseId = new mongoose.Types.ObjectId(shop.warehouseId);
+    }
+
+    let normalizedLimit = Number(limit);
+    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
+      normalizedLimit = 50;
+    }
+    normalizedLimit = Math.min(normalizedLimit, 500);
+
+    let normalizedTopLimit = Number(topLimit);
+    if (!Number.isInteger(normalizedTopLimit) || normalizedTopLimit <= 0) {
+      normalizedTopLimit = 10;
+    }
+    normalizedTopLimit = Math.min(normalizedTopLimit, 50);
+
+    const [summaryRows, cashierRows, paymentRows, topProductRows, recentSales, allSalesForCashiers] = await Promise.all([
+      Sale.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            totalSalesCount: { $sum: 1 },
+            totalSalesAmount: { $sum: "$totalAmount" },
+            cashTotal: { $sum: "$cashAmount" },
+            cardTotal: { $sum: "$cardAmount" },
+            clickTotal: { $sum: "$clickAmount" },
+            creditTotal: { $sum: { $cond: [{ $eq: ["$paymentType", "credit"] }, "$dueAmount", 0] } },
+            paidAmountTotal: { $sum: "$paidAmount" },
+          },
+        },
+      ]),
+      Sale.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: "$createdBy",
+            totalSalesCount: { $sum: 1 },
+            totalSalesAmount: { $sum: "$totalAmount" },
+            cashTotal: { $sum: "$cashAmount" },
+            cardTotal: { $sum: "$cardAmount" },
+            clickTotal: { $sum: "$clickAmount" },
+            paidAmountTotal: { $sum: "$paidAmount" },
+            averageCheck: { $avg: "$totalAmount" },
+            lastSaleAt: { $max: "$createdAt" },
+          },
+        },
+        { $sort: { totalSalesAmount: -1, totalSalesCount: -1 } },
+      ]),
+      Sale.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: "$paymentType",
+            count: { $sum: 1 },
+            totalAmount: { $sum: "$totalAmount" },
+            cashTotal: { $sum: "$cashAmount" },
+            cardTotal: { $sum: "$cardAmount" },
+            clickTotal: { $sum: "$clickAmount" },
+          },
+        },
+        { $sort: { totalAmount: -1 } },
+      ]),
+      Sale.aggregate([
+        { $match: query },
+        { $unwind: "$items" },
+        {
+          $group: {
+            _id: "$items.productId",
+            soldQuantity: { $sum: "$items.quantity" },
+            soldAmount: { $sum: "$items.total" },
+            salesCount: { $sum: 1 },
+          },
+        },
+        { $sort: { soldQuantity: -1, soldAmount: -1 } },
+        { $limit: normalizedTopLimit },
+      ]),
+      Sale.find(query)
+        .sort({ createdAt: -1 })
+        .limit(normalizedLimit)
+        .populate("createdBy", "fullName role")
+        .populate("warehouseId", "name")
+        .populate("shiftId", "status openedAt closedAt")
+        .populate("clientId", "name phone")
+        .populate("items.productId", "name model barcode miniSellPrice sellPrice wholesalePrice"),
+      Sale.find(query)
+        .sort({ createdAt: -1 })
+        .select(
+          "_id warehouseId subtotal discount totalAmount paymentType cashAmount cardAmount clickAmount paidAmount dueAmount note createdBy createdAt"
+        )
+        .populate({
+          path: "createdBy",
+          select: "fullName phone role shopId",
+          populate: {
+            path: "shopId",
+            select: "name warehouseId isActive",
+            populate: {
+              path: "warehouseId",
+              select: "name isActive",
+            },
+          },
+        })
+        .populate("warehouseId", "name"),
+    ]);
+
+    const scopeRows = await Sale.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          warehouseIds: { $addToSet: "$warehouseId" },
+          cashierIds: { $addToSet: "$createdBy" },
+        },
+      },
+    ]);
+
+    const summary = summaryRows[0] || {
+      totalSalesCount: 0,
+      totalSalesAmount: 0,
+      cashTotal: 0,
+      cardTotal: 0,
+      clickTotal: 0,
+      creditTotal: 0,
+      paidAmountTotal: 0,
+    };
+
+    const cashierIds = cashierRows.map((row) => row._id).filter(Boolean);
+    const cashiers = cashierIds.length
+      ? await User.find({ _id: { $in: cashierIds } })
+          .select("fullName phone role isActive shopId")
+          .populate({
+            path: "shopId",
+            select: "name warehouseId isActive",
+            populate: {
+              path: "warehouseId",
+              select: "name isActive",
+            },
+          })
+          .lean()
+      : [];
+    const cashierMap = new Map(cashiers.map((user) => [String(user._id), user]));
+
+    const productIds = topProductRows.map((row) => row._id).filter(Boolean);
+    const products = productIds.length
+      ? await Product.find({ _id: { $in: productIds } })
+          .select("name model barcode miniSellPrice sellPrice wholesalePrice")
+          .lean()
+      : [];
+    const productMap = new Map(products.map((product) => [String(product._id), product]));
+
+    const scope = scopeRows[0] || { warehouseIds: [], cashierIds: [] };
+    const distinctWarehouseIds = (scope.warehouseIds || []).filter(Boolean).map((id) => String(id));
+    const distinctCashierIds = (scope.cashierIds || []).filter(Boolean).map((id) => String(id));
+    const distinctShops = distinctWarehouseIds.length
+      ? await Shop.find({ warehouseId: { $in: distinctWarehouseIds } })
+          .select("_id name warehouseId isActive")
+          .populate("warehouseId", "name")
+          .lean()
+      : [];
+    const distinctWarehouses = distinctWarehouseIds.length
+      ? await Warehouse.find({ _id: { $in: distinctWarehouseIds } }).select("_id name isActive").lean()
+      : [];
+    const distinctCashiers = distinctCashierIds.length
+      ? await User.find({ _id: { $in: distinctCashierIds } })
+          .select("_id fullName phone role isActive shopId")
+          .populate("shopId", "name warehouseId isActive")
+          .lean()
+      : [];
+
+    const cashierBreakdown = cashierRows.map((row) => {
+      const cashier = cashierMap.get(String(row._id));
+      const cashierShop = cashier?.shopId || null;
+      const totalSalesAmount = round2(row.totalSalesAmount);
+      const totalSalesCount = Number(row.totalSalesCount || 0);
+      return {
+        cashierId: row._id,
+        cashierName: cashier?.fullName || null,
+        cashierPhone: cashier?.phone || null,
+        shopId: cashierShop?._id || null,
+        shopName: cashierShop?.name || null,
+        warehouseId: cashierShop?.warehouseId || null,
+        totalSalesCount,
+        totalSalesAmount,
+        cashTotal: round2(row.cashTotal),
+        cardTotal: round2(row.cardTotal),
+        clickTotal: round2(row.clickTotal),
+        paidAmountTotal: round2(row.paidAmountTotal),
+        averageCheck: round2(row.averageCheck),
+        lastSaleAt: row.lastSaleAt,
+      };
+    });
+
+    const salesByCashierMap = new Map();
+    for (const sale of allSalesForCashiers) {
+      const cashierId = sale?.createdBy?._id ? String(sale.createdBy._id) : String(sale.createdBy || "");
+      if (!cashierId) continue;
+
+      const bucket = salesByCashierMap.get(cashierId) || [];
+      bucket.push({
+        saleId: sale._id,
+        warehouseId: sale?.warehouseId?._id || sale.warehouseId || null,
+        warehouseName: sale?.warehouseId?.name || null,
+        subtotal: round2(sale.subtotal || 0),
+        discount: round2(sale.discount || 0),
+        totalAmount: round2(sale.totalAmount || 0),
+        paymentType: sale.paymentType || null,
+        cashAmount: round2(sale.cashAmount || 0),
+        cardAmount: round2(sale.cardAmount || 0),
+        clickAmount: round2(sale.clickAmount || 0),
+        paidAmount: round2(sale.paidAmount || 0),
+        dueAmount: round2(sale.dueAmount || 0),
+        note: sale.note || "",
+        createdAt: sale.createdAt,
+      });
+      salesByCashierMap.set(cashierId, bucket);
+    }
+
+    const salesByCashier = cashierBreakdown.map((cashier) => ({
+      cashierId: cashier.cashierId,
+      cashierName: cashier.cashierName,
+      cashierPhone: cashier.cashierPhone,
+      shopId: cashier.shopId,
+      shopName: cashier.shopName,
+      warehouseId: cashier.warehouseId,
+      totalSalesCount: cashier.totalSalesCount,
+      totalSalesAmount: cashier.totalSalesAmount,
+      cashTotal: cashier.cashTotal,
+      cardTotal: cashier.cardTotal,
+      clickTotal: cashier.clickTotal,
+      paidAmountTotal: cashier.paidAmountTotal,
+      averageCheck: cashier.averageCheck,
+      lastSaleAt: cashier.lastSaleAt,
+      sales: salesByCashierMap.get(String(cashier.cashierId)) || [],
+    }));
+
+    const paymentBreakdown = paymentRows.map((row) => ({
+      paymentType: row._id,
+      count: Number(row.count || 0),
+      totalAmount: round2(row.totalAmount),
+      cashTotal: round2(row.cashTotal),
+      cardTotal: round2(row.cardTotal),
+      clickTotal: round2(row.clickTotal),
+    }));
+
+    const topProducts = topProductRows.map((row) => {
+      const product = productMap.get(String(row._id));
+      return {
+        productId: row._id,
+        productName: product?.name || null,
+        productModel: product?.model || null,
+        barcode: product?.barcode || null,
+        miniSellPrice: product?.miniSellPrice ?? null,
+        sellPrice: product?.sellPrice ?? null,
+        wholesalePrice: product?.wholesalePrice ?? null,
+        soldQuantity: round2(row.soldQuantity),
+        soldAmount: round2(row.soldAmount),
+        salesCount: Number(row.salesCount || 0),
+      };
+    });
+
+    const totalSalesCount = Number(summary.totalSalesCount || 0);
+    const totalSalesAmount = round2(summary.totalSalesAmount);
+
+    return res.json({
+      filters: {
+        date: date || null,
+        from: from || null,
+        to: to || null,
+        warehouseId: warehouseId || null,
+        cashierId: cashierId || null,
+        shopId: shopId || null,
+      },
+      summary: {
+        totalSalesCount,
+        totalSalesAmount,
+        cashTotal: round2(summary.cashTotal),
+        cardTotal: round2(summary.cardTotal),
+        clickTotal: round2(summary.clickTotal),
+        creditTotal: round2(summary.creditTotal),
+        paidAmountTotal: round2(summary.paidAmountTotal),
+        averageCheck: totalSalesCount > 0 ? round2(totalSalesAmount / totalSalesCount) : 0,
+      },
+      scope: {
+        shops: distinctShops,
+        warehouses: distinctWarehouses,
+        cashiers: distinctCashiers,
+      },
+      cashierBreakdown,
+      salesByCashier,
+      paymentBreakdown,
+      topProducts,
+      recentSales,
+    });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("cannot")) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    return res.status(500).json({ message: error.message });
   }
 };
 
@@ -681,7 +1174,7 @@ exports.searchSaleProducts = async (req, res) => {
       .populate({
         path: "productId",
         select:
-          "name model barcode baseUnit hasPackage packageQuantity sellPrice wholesalePrice blockSellPrice isActive categoryId",
+          "name model barcode baseUnit hasPackage packageQuantity sellPrice miniSellPrice wholesalePrice blockSellPrice isActive categoryId",
         match: {
           isActive: true,
           $or: [{ name: searchRegex }, { model: searchRegex }],
@@ -780,7 +1273,7 @@ exports.getTopSaleProductsStats = async (req, res) => {
     const productIds = top.map((x) => x._id);
     const [products, stocks] = await Promise.all([
       Product.find({ _id: { $in: productIds }, isActive: true })
-        .select("name model barcode baseUnit sellPrice wholesalePrice blockSellPrice hasPackage packageQuantity")
+        .select("name model barcode baseUnit sellPrice miniSellPrice wholesalePrice blockSellPrice hasPackage packageQuantity")
         .lean(),
       Stock.find({ warehouseId: shopWarehouse._id, productId: { $in: productIds } })
         .select("productId quantity")
@@ -844,7 +1337,7 @@ exports.getTopProductsAvailable = async (req, res) => {
       .populate({
         path: "productId",
         select:
-          "name model barcode baseUnit sellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
+          "name model barcode baseUnit sellPrice miniSellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
         match: searchRegex
           ? {
               isActive: true,
@@ -982,7 +1475,7 @@ exports.getQuickSaleProducts = async (req, res) => {
       .sort({ order: 1, createdAt: 1 })
       .populate(
         "productId",
-        "name model barcode baseUnit sellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
+        "name model barcode baseUnit sellPrice miniSellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
       )
       .lean();
 

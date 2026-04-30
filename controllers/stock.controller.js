@@ -44,10 +44,27 @@ exports.getStocks = async (req, res) => {
   try {
     const stocks = await Stock.find()
       .sort({ createdAt: -1 })
-      .populate("productId", "name model barcode baseUnit")
+      .populate(
+        "productId",
+        "name model barcode baseUnit sellPrice wholesalePrice miniSellPrice minStockQuantity reorderQuantity",
+      )
       .populate("warehouseId", "name");
 
-    res.json(stocks);
+    const normalized = stocks.map((stock) => {
+      const product = stock.productId || {};
+      const quantity = Number(stock.quantity || 0);
+      const minStockQuantity = Number(product.minStockQuantity);
+      return {
+        ...stock.toObject(),
+        isLowStock:
+          Number.isFinite(minStockQuantity) && minStockQuantity >= 0
+            ? quantity <= minStockQuantity
+            : false,
+        lowStockThreshold: Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? minStockQuantity : null,
+      };
+    });
+
+    res.json(normalized);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -61,14 +78,25 @@ exports.getStockById = async (req, res) => {
     }
 
     const stock = await Stock.findById(id)
-      .populate("productId", "name model barcode baseUnit")
+      .populate(
+        "productId",
+        "name model barcode baseUnit sellPrice wholesalePrice miniSellPrice minStockQuantity reorderQuantity",
+      )
       .populate("warehouseId", "name");
 
     if (!stock) {
       return res.status(404).json({ message: "Stock not found" });
     }
 
-    res.json(stock);
+    const product = stock.productId || {};
+    const quantity = Number(stock.quantity || 0);
+    const minStockQuantity = Number(product.minStockQuantity);
+    res.json({
+      ...stock.toObject(),
+      isLowStock:
+        Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? quantity <= minStockQuantity : false,
+      lowStockThreshold: Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? minStockQuantity : null,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -149,7 +177,7 @@ exports.getWarehouseStock = async (req, res) => {
     const stocks = await Stock.find({ warehouseId })
       .populate({
         path: "productId",
-        select: "name model barcode baseUnit categoryId",
+        select: "name model barcode baseUnit categoryId minStockQuantity reorderQuantity",
         populate: {
           path: "categoryId",
           select: "name description isActive",
@@ -164,7 +192,16 @@ exports.getWarehouseStock = async (req, res) => {
         name: warehouse.name,
       },
       totalProducts: stocks.length,
-      data: stocks,
+      data: stocks.map((stock) => {
+        const quantity = Number(stock.quantity || 0);
+        const minStockQuantity = Number(stock.productId?.minStockQuantity);
+        return {
+          ...stock,
+          isLowStock:
+            Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? quantity <= minStockQuantity : false,
+          lowStockThreshold: Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? minStockQuantity : null,
+        };
+      }),
     });
   } catch (error) {
     console.error("Get warehouse stock error:", error);

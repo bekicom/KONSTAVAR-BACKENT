@@ -23,6 +23,7 @@ const toBoolean = (value) => {
 
 exports.createPurchase = async (req, res) => {
   const session = undefined;
+  const DEFAULT_SUPPLIER_NAME = "Noma'lum yetkazib beruvchi";
 
   try {
     const { warehouseId, items, supplierId, supplier, paymentType, paidAmount } = req.body;
@@ -81,7 +82,22 @@ exports.createPurchase = async (req, res) => {
       }
 
       if (!resolvedSupplier) {
-        throw new Error("supplierId or supplier{name,...} is required");
+        resolvedSupplier = await Supplier.findOne({ name: DEFAULT_SUPPLIER_NAME }).session(session);
+
+        if (!resolvedSupplier) {
+          const createdSuppliers = await Supplier.create(
+            [
+              {
+                name: DEFAULT_SUPPLIER_NAME,
+                phone: null,
+                address: "",
+                note: "Auto-created default supplier for purchases without supplier data",
+              },
+            ],
+            { session },
+          );
+          [resolvedSupplier] = createdSuppliers;
+        }
       }
 
       for (const item of items) {
@@ -100,6 +116,9 @@ exports.createPurchase = async (req, res) => {
           sellPrice,
           sellPriceStrategy,
           wholesalePrice,
+          miniSellPrice,
+          minStockQuantity,
+          reorderQuantity,
           blockSellPrice,
           inputType,
         } = item;
@@ -109,6 +128,9 @@ exports.createPurchase = async (req, res) => {
         const normalizedBlockPurchasePrice = toNumberOrNaN(blockPurchasePrice);
         const normalizedSellPrice = toNumberOrNaN(sellPrice);
         const normalizedWholesalePrice = toNumberOrNaN(wholesalePrice);
+        const normalizedMiniSellPrice = toNumberOrNaN(miniSellPrice);
+        const normalizedMinStockQuantity = toNumberOrNaN(minStockQuantity);
+        const normalizedReorderQuantity = toNumberOrNaN(reorderQuantity);
         const normalizedBlockSellPrice = toNumberOrNaN(blockSellPrice);
 
         let resolvedCategoryId = null;
@@ -199,6 +221,9 @@ exports.createPurchase = async (req, res) => {
                 blockPurchasePrice: hasPackage && normalizedBlockPurchasePrice > 0 ? normalizedBlockPurchasePrice : null,
                 sellPrice: normalizedSellPrice,
                 wholesalePrice: Number.isFinite(normalizedWholesalePrice) && normalizedWholesalePrice > 0 ? normalizedWholesalePrice : null,
+                miniSellPrice: Number.isFinite(normalizedMiniSellPrice) && normalizedMiniSellPrice > 0 ? normalizedMiniSellPrice : null,
+                minStockQuantity: Number.isFinite(normalizedMinStockQuantity) && normalizedMinStockQuantity >= 0 ? normalizedMinStockQuantity : null,
+                reorderQuantity: Number.isFinite(normalizedReorderQuantity) && normalizedReorderQuantity > 0 ? normalizedReorderQuantity : null,
                 blockSellPrice: Number.isFinite(normalizedBlockSellPrice) && normalizedBlockSellPrice > 0 ? normalizedBlockSellPrice : null,
               },
             ],
@@ -260,6 +285,15 @@ exports.createPurchase = async (req, res) => {
 
         if (Number.isFinite(normalizedWholesalePrice) && normalizedWholesalePrice > 0) {
           product.wholesalePrice = normalizedWholesalePrice;
+        }
+        if (Number.isFinite(normalizedMiniSellPrice) && normalizedMiniSellPrice > 0) {
+          product.miniSellPrice = normalizedMiniSellPrice;
+        }
+        if (Number.isFinite(normalizedMinStockQuantity) && normalizedMinStockQuantity >= 0) {
+          product.minStockQuantity = normalizedMinStockQuantity;
+        }
+        if (Number.isFinite(normalizedReorderQuantity) && normalizedReorderQuantity > 0) {
+          product.reorderQuantity = normalizedReorderQuantity;
         }
         if (Number.isFinite(normalizedBlockSellPrice) && normalizedBlockSellPrice > 0) {
           product.blockSellPrice = normalizedBlockSellPrice;

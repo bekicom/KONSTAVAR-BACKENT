@@ -19,6 +19,8 @@ const shopController = require("../controllers/shopController");
 const clientController = require("../controllers/clientController");
 const dashboardController = require("../controllers/dashboardController");
 const shiftController = require("../controllers/shiftController");
+const expenseController = require("../controllers/expenseController");
+const salaryController = require("../controllers/salaryController");
 
 
 // Admin create (faqat 1 marta)
@@ -60,6 +62,83 @@ router.get(
   authMiddleware,
   roleMiddleware("admin", "cashier"),
   shiftController.getShiftById,
+);
+
+router.post(
+  "/expenses",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  expenseController.createExpense,
+);
+
+router.get(
+  "/expenses",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  expenseController.getExpenses,
+);
+
+router.get(
+  "/expenses/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  expenseController.getExpenseById,
+);
+
+router.put(
+  "/expenses/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  expenseController.updateExpense,
+);
+
+router.delete(
+  "/expenses/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  expenseController.deleteExpense,
+);
+
+router.get(
+  "/employees",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  salaryController.getEmployees,
+);
+
+router.post(
+  "/salaries",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  salaryController.createSalary,
+);
+
+router.get(
+  "/salaries",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  salaryController.getSalaries,
+);
+
+router.get(
+  "/salaries/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse", "cashier"),
+  salaryController.getSalaryById,
+);
+
+router.put(
+  "/salaries/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  salaryController.updateSalary,
+);
+
+router.delete(
+  "/salaries/:id",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  salaryController.deleteSalary,
 );
 
 router.get(
@@ -558,6 +637,13 @@ router.get(
 );
 
 router.get(
+  "/sales/history",
+  authMiddleware,
+  roleMiddleware("admin"),
+  saleController.getSalesHistory,
+);
+
+router.get(
   "/sales/barcode/:barcode",
   authMiddleware,
   roleMiddleware("admin", "cashier"),
@@ -590,6 +676,13 @@ router.get(
   authMiddleware,
   roleMiddleware("admin", "cashier"),
   saleController.getTopProductsAvailable,
+);
+
+router.get(
+  "/sales/offline-catalog",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getOfflineSaleCatalog,
 );
 
 router.get(

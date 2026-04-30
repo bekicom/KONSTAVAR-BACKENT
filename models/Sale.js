@@ -37,6 +37,11 @@ const saleItemSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    priceType: {
+      type: String,
+      enum: ["retail", "wholesale", "mini", "custom"],
+      default: "custom",
+    },
   },
   { _id: false },
 );

@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Shift = require("../models/Shift");
 const Sale = require("../models/Sale");
 const SaleReturn = require("../models/SaleReturn");
+const Expense = require("../models/Expense");
 const { resolveCashierShop, getOpenCashierShift } = require("../utils/shiftHelper");
 
 const round2 = (value) => Number(Number(value || 0).toFixed(2));
@@ -104,16 +105,37 @@ exports.closeShift = async (req, res) => {
       return res.status(400).json({ message: "Shift already closed" });
     }
 
-    const [sales, returns] = await Promise.all([
-      Sale.find({ shiftId: shift._id }).select("totalAmount paymentType createdAt"),
+    const [sales, returns, expenses] = await Promise.all([
+      Sale.find({ shiftId: shift._id }).select(
+        "totalAmount paymentType cashAmount cardAmount clickAmount paidAmount dueAmount createdAt",
+      ),
       SaleReturn.find({ shiftId: shift._id }).select("subtotal refundType createdAt"),
+      Expense.find({ shiftId: shift._id }).select("amount reason createdAt"),
     ]);
 
     const salesTotal = round2(
       sales.reduce((sum, sale) => sum + Number(sale.totalAmount || 0), 0),
     );
+    const cashSalesTotal = round2(
+      sales.reduce((sum, sale) => sum + Number(sale.cashAmount || 0), 0),
+    );
+    const cardSalesTotal = round2(
+      sales.reduce((sum, sale) => sum + Number(sale.cardAmount || 0), 0),
+    );
+    const clickSalesTotal = round2(
+      sales.reduce((sum, sale) => sum + Number(sale.clickAmount || 0), 0),
+    );
+    const paidAmountTotal = round2(
+      sales.reduce((sum, sale) => sum + Number(sale.paidAmount || 0), 0),
+    );
+    const dueAmountTotal = round2(
+      sales.reduce((sum, sale) => sum + Number(sale.dueAmount || 0), 0),
+    );
     const returnsTotal = round2(
       returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0),
+    );
+    const expensesTotal = round2(
+      expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
     );
 
     shift.status = "closed";
@@ -129,7 +151,18 @@ exports.closeShift = async (req, res) => {
       salesTotal,
       returnsCount: returns.length,
       returnsTotal,
+      expensesCount: expenses.length,
+      expensesTotal,
+      cashSalesTotal,
+      cardSalesTotal,
+      clickSalesTotal,
+      paidAmountTotal,
+      dueAmountTotal,
       netTotal: round2(salesTotal - returnsTotal),
+      netAfterExpenses: round2(salesTotal - returnsTotal - expensesTotal),
+      expectedCashInDrawer: round2(
+        Number(shift.openingCash || 0) + cashSalesTotal - returnsTotal - expensesTotal,
+      ),
     };
 
     await shift.save();
@@ -268,7 +301,7 @@ exports.getShiftById = async (req, res) => {
 
     ensureCashierOwnership(req, shift);
 
-    const [sales, returns] = await Promise.all([
+    const [sales, returns, expenses] = await Promise.all([
       Sale.find({ shiftId: shift._id })
         .sort({ createdAt: -1 })
         .populate("createdBy", "fullName role")
@@ -281,20 +314,31 @@ exports.getShiftById = async (req, res) => {
         .populate("warehouseId", "name")
         .populate("saleId", "createdAt totalAmount paymentType")
         .populate("items.productId", "name model barcode"),
+      Expense.find({ shiftId: shift._id })
+        .sort({ createdAt: -1 })
+        .populate("createdBy", "fullName role"),
     ]);
 
     res.json({
       shift,
       sales,
       returns,
+      expenses,
       summary: {
         salesCount: sales.length,
         salesTotal: round2(sales.reduce((sum, sale) => sum + Number(sale.totalAmount || 0), 0)),
         returnsCount: returns.length,
         returnsTotal: round2(returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0)),
+        expensesCount: expenses.length,
+        expensesTotal: round2(expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0)),
         netTotal: round2(
           sales.reduce((sum, sale) => sum + Number(sale.totalAmount || 0), 0) -
             returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0),
+        ),
+        netAfterExpenses: round2(
+          sales.reduce((sum, sale) => sum + Number(sale.totalAmount || 0), 0) -
+            returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0) -
+            expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
         ),
       },
     });
