@@ -708,6 +708,23 @@ const main = async () => {
     });
   });
 
+  await step("Start cashier shift", async () => {
+    const response = await request("POST", "/shifts/start", {
+      token: state.cashierToken,
+      body: {
+        openingCash: 100000,
+        note: "E2E shift",
+      },
+      expect: 201,
+    });
+    remember("mainShiftId", response.data.shift._id);
+
+    await request("GET", "/shifts/current", {
+      token: state.cashierToken,
+      expect: 200,
+    });
+  });
+
   await step("Run sale helper endpoints before sales", async () => {
     const firstBarcode = getId("mainProductBarcodes")[0];
     await request("GET", `/sales/barcode/${firstBarcode}`, {

@@ -187,6 +187,15 @@ exports.updateInventoryCount = async (req, res) => {
       return res.status(400).json({ message: "items[] is required" });
     }
 
+    const seenProductIds = new Set();
+    for (const incoming of items) {
+      const productId = String(incoming?.productId || "");
+      if (seenProductIds.has(productId)) {
+        return res.status(400).json({ message: "Duplicate productId in items is not allowed" });
+      }
+      seenProductIds.add(productId);
+    }
+
     const session = await InventorySession.findById(id);
     if (!session) {
       return res.status(404).json({ message: "Inventory session not found" });

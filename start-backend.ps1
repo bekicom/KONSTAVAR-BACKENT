@@ -1,3 +1,2 @@
-$env:USE_MEMORY_DB = 'true'
-Set-Location 'D:\REAL LOYHALAR\KONSTAVAR'
+Set-Location $PSScriptRoot
 node server.js

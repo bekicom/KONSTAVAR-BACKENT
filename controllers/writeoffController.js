@@ -20,6 +20,15 @@ exports.createWriteoff = async (req, res) => {
       return res.status(400).json({ message: "reason is required" });
     }
 
+    const seenProductIds = new Set();
+    for (const item of items) {
+      const productId = String(item?.productId || "");
+      if (seenProductIds.has(productId)) {
+        return res.status(400).json({ message: "Duplicate productId in items is not allowed" });
+      }
+      seenProductIds.add(productId);
+    }
+
     let writeoffDoc;
 
     {
@@ -50,6 +59,9 @@ exports.createWriteoff = async (req, res) => {
         if (inputType === "block") {
           if (!product.hasPackage || !product.packageQuantity) {
             throw new Error("This product does not support block writeoff");
+          }
+          if (!Number.isInteger(inputQuantity)) {
+            throw new Error("Block inputQuantity must be a whole number");
           }
           quantity = inputQuantity * product.packageQuantity;
         } else {

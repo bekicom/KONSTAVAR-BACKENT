@@ -29,6 +29,12 @@ router.post("/create-admin", authController.createAdmin);
 // Login
 router.post("/login", authController.login);
 
+router.get("/me", authMiddleware, userController.getMe);
+
+router.put("/me", authMiddleware, userController.updateMe);
+
+router.put("/me/password", authMiddleware, userController.updateMyPassword);
+
 router.get(
   "/shifts/current",
   authMiddleware,

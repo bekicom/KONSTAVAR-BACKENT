@@ -3,6 +3,55 @@ const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const Shop = require("../models/Shop");
 
+const serializeUser = (user) => {
+  if (!user) return null;
+
+  const raw = typeof user.toObject === "function" ? user.toObject() : user;
+  const { password, ...safeUser } = raw;
+  return safeUser;
+};
+
+const resolveShopIdForRole = async ({
+  role,
+  shopId,
+  existingUser,
+}) => {
+  const updateData = {};
+  const effectiveRole = role || existingUser.role;
+
+  if (shopId !== undefined) {
+    if (shopId === null || shopId === "") {
+      updateData.shopId = null;
+    } else {
+      if (!mongoose.Types.ObjectId.isValid(shopId)) {
+        const error = new Error("Invalid shopId");
+        error.statusCode = 400;
+        throw error;
+      }
+      const shop = await Shop.findById(shopId).lean();
+      if (!shop) {
+        const error = new Error("Shop not found");
+        error.statusCode = 404;
+        throw error;
+      }
+      updateData.shopId = shop._id;
+    }
+  }
+
+  if (effectiveRole === "cashier") {
+    const finalShopId = updateData.shopId !== undefined ? updateData.shopId : existingUser.shopId;
+    if (!finalShopId) {
+      const error = new Error("shopId is required for cashier");
+      error.statusCode = 400;
+      throw error;
+    }
+  } else {
+    updateData.shopId = null;
+  }
+
+  return updateData;
+};
+
 exports.getUsers = async (req, res) => {
   try {
     const users = await User.find({}, { password: 0 })
@@ -67,30 +116,10 @@ exports.updateUser = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const effectiveRole = role || existingUser.role;
-    if (shopId !== undefined) {
-      if (shopId === null || shopId === "") {
-        updateData.shopId = null;
-      } else {
-        if (!mongoose.Types.ObjectId.isValid(shopId)) {
-          return res.status(400).json({ message: "Invalid shopId" });
-        }
-        const shop = await Shop.findById(shopId).lean();
-        if (!shop) {
-          return res.status(404).json({ message: "Shop not found" });
-        }
-        updateData.shopId = shop._id;
-      }
-    }
-
-    if (effectiveRole === "cashier") {
-      const finalShopId = updateData.shopId !== undefined ? updateData.shopId : existingUser.shopId;
-      if (!finalShopId) {
-        return res.status(400).json({ message: "shopId is required for cashier" });
-      }
-    } else {
-      updateData.shopId = null;
-    }
+    Object.assign(
+      updateData,
+      await resolveShopIdForRole({ role, shopId, existingUser }),
+    );
 
     if (password) {
       updateData.password = await bcrypt.hash(password, 10);
@@ -106,6 +135,96 @@ exports.updateUser = async (req, res) => {
       message: "User updated successfully",
       user,
     });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.getMe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id, { password: 0 }).populate(
+      "shopId",
+      "name warehouseId isActive",
+    );
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({ user: serializeUser(user) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.updateMe = async (req, res) => {
+  try {
+    const { fullName, phone } = req.body;
+    const id = req.user._id;
+
+    if (phone) {
+      const existing = await User.findOne({ phone, _id: { $ne: id } }).lean();
+      if (existing) {
+        return res.status(409).json({ message: "Phone already used" });
+      }
+    }
+
+    const updateData = {};
+    if (fullName !== undefined) {
+      updateData.fullName = fullName;
+    }
+    if (phone !== undefined) {
+      updateData.phone = phone;
+    }
+
+    const user = await User.findByIdAndUpdate(id, updateData, {
+      new: true,
+      runValidators: true,
+      select: "-password",
+    }).populate("shopId", "name warehouseId isActive");
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      message: "Profile updated successfully",
+      user: serializeUser(user),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.updateMyPassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        message: "currentPassword and newPassword are required",
+      });
+    }
+
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({
+        message: "New password must be at least 6 characters long",
+      });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Current password is incorrect" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    res.json({ message: "Password updated successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
