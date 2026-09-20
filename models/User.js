@@ -30,6 +30,18 @@ const userSchema = new mongoose.Schema(
       ref: "Shop",
       default: null,
     },
+    warehouseIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Warehouse",
+      },
+    ],
+    allowedMenuKeys: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
 
     isActive: {
       type: Boolean,

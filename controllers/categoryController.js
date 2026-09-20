@@ -30,8 +30,38 @@ exports.createCategory = async (req, res) => {
 
 exports.getCategories = async (req, res) => {
   try {
-    const categories = await Category.find().sort({ createdAt: -1 });
-    res.json(categories);
+    const { search, isActive } = req.query;
+    const filter = {};
+    if (isActive !== undefined) filter.isActive = String(isActive) === "true";
+    if (search) {
+      const s = String(search).trim();
+      if (s) {
+        const escape = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp(escape(s), "i");
+        filter.$or = [{ name: regex }, { description: regex }];
+      }
+    }
+
+    const { paginateQuery } = require("../utils/pagination");
+    const result = await paginateQuery({
+      Model: Category,
+      filter,
+      queryParams: req.query,
+      defaultSort: { createdAt: -1, _id: -1 },
+    });
+
+    if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
+      return res.json(result.items);
+    }
+
+    res.json({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      pages: result.pages,
+      hasMore: result.hasMore,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

@@ -155,19 +155,30 @@ exports.getExpenses = async (req, res) => {
       }
     }
 
-    let normalizedLimit = Number(limit);
-    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
-      normalizedLimit = 100;
+    const { paginateQuery } = require("../utils/pagination");
+    const result = await paginateQuery({
+      Model: Expense,
+      filter: query,
+      queryParams: req.query,
+      defaultSort: { createdAt: -1, _id: -1 },
+      populate: (q) =>
+        q
+          .populate("shiftId", "status openedAt closedAt shopId warehouseId cashierId")
+          .populate("createdBy", "fullName role"),
+    });
+
+    if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
+      return res.json(result.items);
     }
-    normalizedLimit = Math.min(normalizedLimit, 1000);
 
-    const expenses = await Expense.find(query)
-      .sort({ createdAt: -1 })
-      .limit(normalizedLimit)
-      .populate("shiftId", "status openedAt closedAt shopId warehouseId cashierId")
-      .populate("createdBy", "fullName role");
-
-    return res.json(expenses);
+    return res.json({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      pages: result.pages,
+      hasMore: result.hasMore,
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

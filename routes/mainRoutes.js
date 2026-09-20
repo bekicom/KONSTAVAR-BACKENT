@@ -21,6 +21,8 @@ const dashboardController = require("../controllers/dashboardController");
 const shiftController = require("../controllers/shiftController");
 const expenseController = require("../controllers/expenseController");
 const salaryController = require("../controllers/salaryController");
+const appSettingsController = require("../controllers/appSettingsController");
+const fiscalProductController = require("../controllers/fiscalProductController");
 
 
 // Admin create (faqat 1 marta)
@@ -28,6 +30,12 @@ router.post("/create-admin", authController.createAdmin);
 
 // Login
 router.post("/login", authController.login);
+
+router.get("/me", authMiddleware, userController.getMe);
+
+router.put("/me", authMiddleware, userController.updateMe);
+
+router.put("/me/password", authMiddleware, userController.updateMyPassword);
 
 router.get(
   "/shifts/current",
@@ -41,6 +49,13 @@ router.post(
   authMiddleware,
   roleMiddleware("cashier"),
   shiftController.startShift,
+);
+
+router.post(
+  "/shifts/close",
+  authMiddleware,
+  roleMiddleware("cashier"),
+  shiftController.closeCurrentShift,
 );
 
 router.post(
@@ -459,6 +474,37 @@ router.post(
   productController.createProduct
 );
 
+router.get(
+  "/fiscal-products",
+  fiscalProductController.getFiscalProducts
+);
+
+router.get(
+  "/fiscal-products/:id",
+  fiscalProductController.getFiscalProductById
+);
+
+router.post(
+  "/fiscal-products",
+  authMiddleware,
+  roleMiddleware("admin", "bugalter"),
+  fiscalProductController.saveFiscalProduct
+);
+
+router.put(
+  "/fiscal-products/:id",
+  authMiddleware,
+  roleMiddleware("admin", "bugalter"),
+  fiscalProductController.saveFiscalProduct
+);
+
+router.delete(
+  "/fiscal-products/:id",
+  authMiddleware,
+  roleMiddleware("admin", "bugalter"),
+  fiscalProductController.deleteFiscalProduct
+);
+
 // GET ALL
 router.get(
   "/products",
@@ -644,6 +690,13 @@ router.get(
 );
 
 router.get(
+  "/sales/history/excel",
+  authMiddleware,
+  roleMiddleware("admin"),
+  saleController.exportSalesHistoryExcel,
+);
+
+router.get(
   "/sales/barcode/:barcode",
   authMiddleware,
   roleMiddleware("admin", "cashier"),
@@ -720,6 +773,21 @@ router.get(
   saleController.getSaleReturnsBySaleId,
 );
 
+// 🔹 Fiskal (Soliq/OFD — E-POS) — tayyor payload olish va natijani saqlash
+router.get(
+  "/sales/:id/fiscal/payload",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.getFiscalPayload,
+);
+
+router.post(
+  "/sales/:id/fiscal",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  saleController.saveFiscalResult,
+);
+
 router.get(
   "/sales/:id",
   authMiddleware,
@@ -774,6 +842,74 @@ router.post(
   authMiddleware,
   roleMiddleware("admin", "warehouse"),
   inventoryController.cancelInventorySession,
+);
+
+// 🔹 Tizim xavfsizlik sozlamalari (faqat admin) — do'kon/ombor o'chirish kodi
+router.get(
+  "/app-settings/security",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.getSecuritySettings,
+);
+
+router.put(
+  "/app-settings/deletion-code",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.setDeletionCode,
+);
+
+router.delete(
+  "/app-settings/deletion-code",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.disableDeletionCode,
+);
+
+// 🔹 To'liq sotuv hisoboti kodi (report code)
+router.get(
+  "/app-settings/report-code",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.getReportCodeStatus,
+);
+
+router.put(
+  "/app-settings/report-code",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.setReportCode,
+);
+
+router.delete(
+  "/app-settings/report-code",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.disableReportCode,
+);
+
+// Kodni tekshirish — kassir ham chaqira oladi (to'liq hisobotni ochish uchun)
+router.post(
+  "/app-settings/report-code/verify",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  appSettingsController.verifyReportCode,
+);
+
+// 🔹 Fiskal (Soliq/OFD — E-POS) kompaniya sozlamalari
+// GET — kassir ham o'qiy oladi (fiscal.enabled, printerSize va h.k.)
+router.get(
+  "/app-settings/fiscal",
+  authMiddleware,
+  roleMiddleware("admin", "cashier"),
+  appSettingsController.getFiscalSettings,
+);
+
+router.put(
+  "/app-settings/fiscal",
+  authMiddleware,
+  roleMiddleware("admin"),
+  appSettingsController.updateFiscalSettings,
 );
 
 module.exports = router;

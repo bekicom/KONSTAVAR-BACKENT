@@ -10,6 +10,8 @@ const SaleReturn = require("../models/SaleReturn");
 const ClientPayment = require("../models/ClientPayment");
 const ShopTransfer = require("../models/ShopTransfer");
 const Shop = require("../models/Shop");
+const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
+const { verifyDeletionCodeFromRequest } = require("../utils/deletionCodeGuard");
 
 // 🔹 CREATE
 exports.createWarehouse = async (req, res) => {
@@ -38,7 +40,9 @@ exports.createWarehouse = async (req, res) => {
 // 🔹 GET ALL
 exports.getWarehouses = async (req, res) => {
   try {
-    const warehouses = await Warehouse.find().sort({ createdAt: -1 });
+    const warehouses = await Warehouse.find(applyWarehouseScope(req.user, {}, "_id")).sort({
+      createdAt: -1,
+    });
     res.json(warehouses);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -52,6 +56,8 @@ exports.getWarehouseById = async (req, res) => {
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid warehouse ID" });
     }
+
+    ensureWarehouseAccess(req.user, id);
 
     const warehouse = await Warehouse.findById(id);
     if (!warehouse) {
@@ -100,6 +106,13 @@ exports.deleteWarehouse = async (req, res) => {
     const warehouse = await Warehouse.findById(id);
     if (!warehouse) {
       return res.status(404).json({ message: "Warehouse not found" });
+    }
+
+    const codeCheck = await verifyDeletionCodeFromRequest(req);
+    if (!codeCheck.ok) {
+      return res
+        .status(codeCheck.status)
+        .json({ message: codeCheck.message, code: codeCheck.reason });
     }
 
     const references = await Promise.all([

@@ -1,0 +1,161 @@
+# Frontend Pagination README
+
+Quyidagi 2 ta endpoint frontend uchun pagination bilan ishlaydi:
+
+- `GET /api/stocks`
+- `GET /api/purchases`
+
+Ikkalasida ham bir xil pagination format ishlatiladi.
+
+## Paginationni yoqish
+
+Backend paginated object qaytarishi uchun queryda quyidagilardan bittasi bo'lishi kerak:
+
+- `page`
+- `skip`
+- `paginated=true`
+
+Tavsiya etilgan ishlatish usuli:
+
+```http
+GET /api/stocks?page=1&limit=20
+GET /api/purchases?page=1&limit=20
+```
+
+## Query parametrlari
+
+- `page` - sahifa raqami, `1` dan boshlanadi
+- `limit` - har sahifada nechta element kelishi
+- `skip` - nechta yozuv tashlab o'tilishi
+- `sort` - masalan `updatedAt:-1,_id:-1` yoki `createdAt:-1,_id:-1`
+- `paginated=true` - `page` bermasdan ham object format majburiy olish uchun
+
+Default qiymatlar:
+
+- `page=1`
+- `limit=50`
+- `max limit=500`
+
+## Response formati
+
+Pagination bilan chaqirilganda javob:
+
+```json
+{
+  "items": [],
+  "total": 125,
+  "page": 1,
+  "limit": 20,
+  "pages": 7,
+  "hasMore": true
+}
+```
+
+Frontend aynan `items` ni list sifatida ishlatadi.
+
+## Orqaga moslik
+
+Agar frontend `page`, `skip` yoki `paginated=true` yubormasa, backend eski formatni saqlab qoladi:
+
+```json
+[]
+```
+
+Shuning uchun yangi paginationli ekranlarda `page` yoki `paginated=true` yuborish shart.
+
+## Stocks endpoint
+
+Endpoint:
+
+```http
+GET /api/stocks
+Authorization: Bearer TOKEN
+Content-Type: application/json
+```
+
+Misollar:
+
+```http
+GET /api/stocks?page=1&limit=20
+GET /api/stocks?page=2&limit=20
+GET /api/stocks?paginated=true&limit=20
+GET /api/stocks?page=1&limit=20&warehouseId=WAREHOUSE_ID
+GET /api/stocks?page=1&limit=20&sort=updatedAt:-1,_id:-1
+```
+
+Qo'shimcha filter:
+
+- `warehouseId`
+
+Sort tavsiyasi:
+
+- default `updatedAt:-1,_id:-1`
+
+## Purchases endpoint
+
+Endpoint:
+
+```http
+GET /api/purchases
+Authorization: Bearer TOKEN
+Content-Type: application/json
+```
+
+Misollar:
+
+```http
+GET /api/purchases?page=1&limit=20
+GET /api/purchases?page=2&limit=20
+GET /api/purchases?paginated=true&limit=20
+GET /api/purchases?page=1&limit=20&supplierId=SUPPLIER_ID
+GET /api/purchases?page=1&limit=20&warehouseId=WAREHOUSE_ID
+GET /api/purchases?page=1&limit=20&paymentType=cash
+GET /api/purchases?page=1&limit=20&from=2026-07-01&to=2026-07-25
+GET /api/purchases?page=1&limit=20&sort=createdAt:-1,_id:-1
+```
+
+Qo'shimcha filterlar:
+
+- `supplierId`
+- `warehouseId`
+- `paymentType`
+- `from`
+- `to`
+
+Sort tavsiyasi:
+
+- default `createdAt:-1,_id:-1`
+
+## Flutter / Dio misol
+
+```dart
+final response = await dio.get(
+  '/api/stocks',
+  queryParameters: {
+    'page': 1,
+    'limit': 20,
+  },
+);
+
+final data = response.data as Map<String, dynamic>;
+final items = List<Map<String, dynamic>>.from(data['items'] ?? []);
+final total = data['total'] ?? 0;
+final page = data['page'] ?? 1;
+final pages = data['pages'] ?? 1;
+final hasMore = data['hasMore'] ?? false;
+```
+
+`/api/purchases` uchun ham xuddi shu parse ishlaydi.
+
+## Infinite scroll tavsiya
+
+- birinchi request: `page=1&limit=20`
+- keyingi request: `page + 1`
+- `hasMore=false` bo'lsa, keyingi request yuborilmaydi
+- filter o'zgarsa, yana `page=1` dan boshlanadi
+
+## Frontend uchun qisqa qoida
+
+- eski kod array kutayotgan bo'lsa, pagination params yubormasin
+- yangi kod object kutayotgan bo'lsa, doim `page` yuborsin
+- tavsiya: barcha yangi list ekranlarda `page` + `limit` ishlatilsin

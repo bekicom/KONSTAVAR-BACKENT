@@ -194,6 +194,30 @@ exports.closeShift = async (req, res) => {
   }
 };
 
+exports.closeCurrentShift = async (req, res) => {
+  try {
+    const shift = await getOpenCashierShift(req.user);
+    if (!shift) {
+      return res.status(400).json({ message: "Open shift required" });
+    }
+
+    req.params.id = String(shift._id);
+    return exports.closeShift(req, res);
+  } catch (error) {
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("required") ||
+      error.message.includes("assigned") ||
+      error.message.includes("own shift") ||
+      error.message.includes("closed")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    res.status(500).json({ message: error.message });
+  }
+};
+
 exports.getCurrentShift = async (req, res) => {
   try {
     const shift = await getOpenCashierShift(req.user);
@@ -260,22 +284,33 @@ exports.getShifts = async (req, res) => {
       }
     }
 
-    let normalizedLimit = Number(limit);
-    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
-      normalizedLimit = 50;
+    const { paginateQuery } = require("../utils/pagination");
+    const result = await paginateQuery({
+      Model: Shift,
+      filter: query,
+      queryParams: req.query,
+      defaultSort: { openedAt: -1, _id: -1 },
+      populate: (q) =>
+        q
+          .populate("shopId", "name warehouseId")
+          .populate("warehouseId", "name")
+          .populate("cashierId", "fullName role")
+          .populate("openedBy", "fullName role")
+          .populate("closedBy", "fullName role"),
+    });
+
+    if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
+      return res.json(result.items);
     }
-    normalizedLimit = Math.min(normalizedLimit, 200);
 
-    const shifts = await Shift.find(query)
-      .sort({ openedAt: -1 })
-      .limit(normalizedLimit)
-      .populate("shopId", "name warehouseId")
-      .populate("warehouseId", "name")
-      .populate("cashierId", "fullName role")
-      .populate("openedBy", "fullName role")
-      .populate("closedBy", "fullName role");
-
-    res.json(shifts);
+    res.json({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      pages: result.pages,
+      hasMore: result.hasMore,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

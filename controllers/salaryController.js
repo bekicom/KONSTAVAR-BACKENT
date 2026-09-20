@@ -195,19 +195,30 @@ exports.getSalaries = async (req, res) => {
       }
     }
 
-    let normalizedLimit = Number(limit);
-    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
-      normalizedLimit = 100;
+    const { paginateQuery } = require("../utils/pagination");
+    const result = await paginateQuery({
+      Model: Salary,
+      filter: query,
+      queryParams: req.query,
+      defaultSort: { salaryDate: -1, createdAt: -1, _id: -1 },
+      populate: (q) =>
+        q
+          .populate("employeeId", "fullName phone role isActive shopId")
+          .populate("createdBy", "fullName role"),
+    });
+
+    if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
+      return res.json(result.items);
     }
-    normalizedLimit = Math.min(normalizedLimit, 1000);
 
-    const salaries = await Salary.find(query)
-      .sort({ salaryDate: -1, createdAt: -1 })
-      .limit(normalizedLimit)
-      .populate("employeeId", "fullName phone role isActive shopId")
-      .populate("createdBy", "fullName role");
-
-    return res.json(salaries);
+    return res.json({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      pages: result.pages,
+      hasMore: result.hasMore,
+    });
   } catch (error) {
     if (error.message.includes("Invalid role query")) {
       return res.status(400).json({ message: error.message });

@@ -3,6 +3,9 @@ const InventorySession = require("../models/InventorySession");
 const Warehouse = require("../models/Warehouse");
 const Stock = require("../models/Stock");
 const Product = require("../models/Product");
+const StockAdjustment = require("../models/StockAdjustment");
+const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
+const { withTransaction } = require("../utils/withTransaction");
 
 const buildSummary = (items) => {
   let countedItems = 0;
@@ -51,6 +54,8 @@ const buildSummary = (items) => {
 exports.createInventorySession = async (req, res) => {
   try {
     const { warehouseId, note } = req.body;
+
+    ensureWarehouseAccess(req.user, warehouseId);
 
     if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
       return res.status(400).json({ message: "Invalid warehouse ID" });
@@ -120,6 +125,7 @@ exports.getInventorySessions = async (req, res) => {
     const query = {};
 
     if (warehouseId) {
+      ensureWarehouseAccess(req.user, warehouseId);
       if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
       }
@@ -133,7 +139,7 @@ exports.getInventorySessions = async (req, res) => {
       query.status = status;
     }
 
-    const sessions = await InventorySession.find(query)
+    const sessions = await InventorySession.find(applyWarehouseScope(req.user, query))
       .sort({ createdAt: -1 })
       .populate("warehouseId", "name")
       .populate("createdBy", "fullName role")
@@ -168,6 +174,8 @@ exports.getInventorySessionById = async (req, res) => {
       return res.status(404).json({ message: "Inventory session not found" });
     }
 
+    ensureWarehouseAccess(req.user, session.warehouseId);
+
     res.json(session);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -187,10 +195,21 @@ exports.updateInventoryCount = async (req, res) => {
       return res.status(400).json({ message: "items[] is required" });
     }
 
+    const seenProductIds = new Set();
+    for (const incoming of items) {
+      const productId = String(incoming?.productId || "");
+      if (seenProductIds.has(productId)) {
+        return res.status(400).json({ message: "Duplicate productId in items is not allowed" });
+      }
+      seenProductIds.add(productId);
+    }
+
     const session = await InventorySession.findById(id);
     if (!session) {
       return res.status(404).json({ message: "Inventory session not found" });
     }
+
+    ensureWarehouseAccess(req.user, session.warehouseId);
 
     if (session.status !== "draft") {
       return res.status(400).json({ message: "Only draft session can be edited" });
@@ -258,22 +277,42 @@ exports.updateInventoryCount = async (req, res) => {
 };
 
 exports.postInventorySession = async (req, res) => {
-  const dbSession = undefined;
-
   try {
     const { id } = req.params;
-    const { autoFillUncounted = true } = req.body || {};
+    const { autoFillUncounted = false } = req.body || {};
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid inventory session ID" });
     }
 
-    let responseSessionId = null;
-
-    {
+    const responseSessionId = await withTransaction(async (dbSession) => {
       const inventory = await InventorySession.findById(id).session(dbSession);
       if (!inventory) throw new Error("Inventory session not found");
       if (inventory.status !== "draft") throw new Error("Only draft session can be posted");
+      ensureWarehouseAccess(req.user, inventory.warehouseId);
+
+      // Preload product costs once for cost-basis snapshot.
+      const productIds = inventory.items.map((it) => it.productId);
+      const products = await Product.find({ _id: { $in: productIds } })
+        .session(dbSession)
+        .select("purchasePrice")
+        .lean();
+      const costByProduct = new Map(
+        products.map((p) => [String(p._id), Number(p.purchasePrice) || 0]),
+      );
+      const liveStocks = await Stock.find({
+        productId: { $in: productIds },
+        warehouseId: inventory.warehouseId,
+      })
+        .session(dbSession)
+        .select("productId quantity")
+        .lean();
+      const liveQtyByProduct = new Map(
+        liveStocks.map((stock) => [String(stock.productId), Number(stock.quantity) || 0]),
+      );
+
+      const adjustmentDocs = [];
+      const stockOps = [];
 
       for (const item of inventory.items) {
         if (item.countedQty === null || item.countedQty === undefined) {
@@ -290,20 +329,51 @@ exports.postInventorySession = async (req, res) => {
           throw new Error("countedQty must be a non-negative number");
         }
 
-        item.difference = Number((item.countedQty - item.systemQty).toFixed(2));
+        // Re-read the live stock snapshot once per session instead of making
+        // a separate query for every item.
+        const liveQty = liveQtyByProduct.get(String(item.productId)) || 0;
 
-        await Stock.findOneAndUpdate(
-          {
+        item.systemQty = liveQty;
+        const delta = Number((item.countedQty - liveQty).toFixed(2));
+        item.difference = delta;
+
+        stockOps.push({
+          updateOne: {
+            filter: { productId: item.productId, warehouseId: inventory.warehouseId },
+            update: { $set: { quantity: item.countedQty } },
+            upsert: true,
+          },
+        });
+
+        if (delta !== 0) {
+          const unitCost = costByProduct.get(String(item.productId)) || 0;
+          const totalCost = Number((delta * unitCost).toFixed(2));
+          adjustmentDocs.push({
             productId: item.productId,
             warehouseId: inventory.warehouseId,
-          },
-          { quantity: item.countedQty },
-          {
-            upsert: true,
-            setDefaultsOnInsert: true,
-            session: dbSession,
-          },
-        );
+            delta,
+            systemQty: liveQty,
+            countedQty: item.countedQty,
+            unitCost,
+            totalCost,
+            reason: "inventory",
+            sourceModel: "InventorySession",
+            sourceId: inventory._id,
+            note: item.reason || "",
+            createdBy: req.user._id,
+          });
+        }
+      }
+
+      if (stockOps.length > 0) {
+        await Stock.bulkWrite(stockOps, { session: dbSession, ordered: true });
+      }
+
+      if (adjustmentDocs.length > 0) {
+        await StockAdjustment.insertMany(adjustmentDocs, {
+          session: dbSession,
+          ordered: true,
+        });
       }
 
       inventory.summary = buildSummary(inventory.items);
@@ -312,8 +382,8 @@ exports.postInventorySession = async (req, res) => {
       inventory.postedBy = req.user._id;
       await inventory.save({ session: dbSession });
 
-      responseSessionId = inventory._id;
-    }
+      return inventory._id;
+    });
 
     const posted = await InventorySession.findById(responseSessionId)
       .populate("warehouseId", "name")
@@ -355,6 +425,8 @@ exports.cancelInventorySession = async (req, res) => {
     if (!session) {
       return res.status(404).json({ message: "Inventory session not found" });
     }
+
+    ensureWarehouseAccess(req.user, session.warehouseId);
 
     if (session.status !== "draft") {
       return res.status(400).json({ message: "Only draft session can be cancelled" });

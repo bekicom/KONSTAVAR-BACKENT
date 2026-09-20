@@ -16,6 +16,8 @@ const Supplier = require("../models/Supplier");
 
 const round2 = (value) => Number(Number(value || 0).toFixed(2));
 const DEFAULT_LOW_STOCK_THRESHOLD = 5;
+const DASHBOARD_CACHE_TTL_MS = 10000;
+const dashboardCache = new Map();
 
 const startOfToday = () => {
   const date = new Date();
@@ -96,10 +98,38 @@ const toStatsMap = (rows) => {
   return map;
 };
 
+const getCachedDashboard = (key) => {
+  const cached = dashboardCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    dashboardCache.delete(key);
+    return null;
+  }
+  return cached.value;
+};
+
+const setCachedDashboard = (key, value) => {
+  dashboardCache.set(key, {
+    value,
+    expiresAt: Date.now() + DASHBOARD_CACHE_TTL_MS,
+  });
+};
+
 exports.getDashboard = async (req, res) => {
   try {
     const lowStockThreshold = DEFAULT_LOW_STOCK_THRESHOLD;
     const period = resolveDashboardRange(req.query);
+    const cacheKey = JSON.stringify({
+      role: req.user?.role || "guest",
+      shopId: String(req.user?.shopId?._id || req.user?.shopId || ""),
+      date: req.query.date || null,
+      from: req.query.from || null,
+      to: req.query.to || null,
+    });
+    const cachedResponse = getCachedDashboard(cacheKey);
+    if (cachedResponse) {
+      return res.json(cachedResponse);
+    }
 
     const [
       warehouses,
@@ -170,7 +200,10 @@ exports.getDashboard = async (req, res) => {
             },
             estimatedRetail: {
               $sum: {
-                $multiply: [{ $ifNull: ["$quantity", 0] }, { $ifNull: ["$product.sellPrice", 0] }],
+                $multiply: [
+                  { $ifNull: ["$quantity", 0] },
+                  { $ifNull: ["$sellPrice", { $ifNull: ["$product.sellPrice", 0] }] },
+                ],
               },
             },
           },
@@ -266,7 +299,10 @@ exports.getDashboard = async (req, res) => {
               },
               stockEstimatedRetail: {
                 $sum: {
-                  $multiply: [{ $ifNull: ["$quantity", 0] }, { $ifNull: ["$product.sellPrice", 0] }],
+                  $multiply: [
+                    { $ifNull: ["$quantity", 0] },
+                    { $ifNull: ["$sellPrice", { $ifNull: ["$product.sellPrice", 0] }] },
+                  ],
                 },
               },
             },
@@ -553,6 +589,8 @@ exports.getDashboard = async (req, res) => {
       totalSales: round2(saleOverview.totalSales),
       totalPurchases: round2(purchaseOverview.totalPurchases),
       stockValue: round2(stockOverview.stockEstimatedRetail),
+      currentPurchaseValue: round2(stockOverview.stockEstimatedCost),
+      currentRetailValue: round2(stockOverview.stockEstimatedRetail),
       clientDebt: round2(saleOverview.totalSalesDue),
       supplierDebt: totalSupplierDebt,
       warehouses: activeWarehouses,
@@ -600,17 +638,19 @@ exports.getDashboard = async (req, res) => {
     const warehouseSummary = warehouseItems.map((item) => ({
       warehouseId: item.warehouseId,
       name: item.name,
-      stockUnits: item.stockUnits,
-      lowStockProducts: item.lowStockProducts,
-      outOfStockProducts: item.outOfStockProducts,
-      stockValue: item.stockValue,
-      sales: item.periodSalesTotal,
-      purchases: item.periodPurchaseTotal,
-      clientDebtTotal: item.clientDebtTotal,
+        stockUnits: item.stockUnits,
+        lowStockProducts: item.lowStockProducts,
+        outOfStockProducts: item.outOfStockProducts,
+        stockValue: item.stockValue,
+        currentPurchaseValue: round2(stockSummaryMap.get(String(item.warehouseId))?.estimatedCost),
+        currentRetailValue: round2(stockSummaryMap.get(String(item.warehouseId))?.estimatedRetail),
+        sales: item.periodSalesTotal,
+        purchases: item.periodPurchaseTotal,
+        clientDebtTotal: item.clientDebtTotal,
       supplierDebtTotal: item.purchaseDueRecorded,
     })).sort((a, b) => b.sales - a.sales);
 
-    return res.json({
+    const response = {
       generatedAt: new Date(),
       filters: {
         date: req.query.date || null,
@@ -623,7 +663,11 @@ exports.getDashboard = async (req, res) => {
       shops: shopSummary,
       debts: debtSummary,
       warehouses: warehouseSummary,
-    });
+    };
+
+    setCachedDashboard(cacheKey, response);
+
+    return res.json(response);
   } catch (error) {
     if (error.message.includes("Invalid date") || error.message.includes("'from' cannot")) {
       return res.status(400).json({ message: error.message });

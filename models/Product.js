@@ -96,6 +96,27 @@ const productSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ───── Fiscal (Soliq/OFD — E-POS) maydonlari ─────
+    // MXIK kodi (mahsulot/xizmat klassifikatori) — E-POS `classCode`
+    fiscalClassCode: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // Qadoq kodi (MXIK package code) — E-POS `packageCode`
+    fiscalPackageCode: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    // QQS (NDS) foizi — E-POS `vatPercent`. Default 0 (QQSsiz).
+    fiscalVatPercent: {
+      type: Number,
+      default: 0,
+    },
+
     isActive: {
       type: Boolean,
       default: true,

@@ -4,12 +4,15 @@ const Supplier = require("../models/Supplier");
 const Warehouse = require("../models/Warehouse");
 const Product = require("../models/Product");
 const Stock = require("../models/Stock");
+const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
+const { decrementStockAtomic, incrementStockAtomic } = require("../utils/stockOps");
+const { withTransaction } = require("../utils/withTransaction");
 
 exports.createSupplierReturn = async (req, res) => {
-  const session = undefined;
-
   try {
     const { warehouseId, supplierId, items, note } = req.body;
+
+    ensureWarehouseAccess(req.user, warehouseId);
 
     if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
       return res.status(400).json({ message: "Invalid warehouse ID" });
@@ -21,9 +24,9 @@ exports.createSupplierReturn = async (req, res) => {
       return res.status(400).json({ message: "Items required" });
     }
 
-    let returnDoc;
-
-    {
+    const returnDoc = await withTransaction(async (session) => {
+      let returnDoc;
+      {
       const [warehouse, supplier] = await Promise.all([
         Warehouse.findById(warehouseId).session(session),
         Supplier.findById(supplierId).session(session),
@@ -62,12 +65,6 @@ exports.createSupplierReturn = async (req, res) => {
           quantity = inputQuantity;
         }
 
-        const stock = await Stock.findOne({ productId, warehouseId }).session(session);
-        if (!stock) throw new Error("Stock not found for product in this warehouse");
-        if (stock.quantity < quantity) {
-          throw new Error("Insufficient stock for return");
-        }
-
         const requestedUnitReturnPrice = Number(unitReturnPrice);
         const normalizedUnitReturnPrice = requestedUnitReturnPrice > 0
           ? requestedUnitReturnPrice
@@ -80,8 +77,7 @@ exports.createSupplierReturn = async (req, res) => {
         const lineTotal = Number((quantity * normalizedUnitReturnPrice).toFixed(2));
         totalAmount += lineTotal;
 
-        stock.quantity -= quantity;
-        await stock.save({ session });
+        await decrementStockAtomic({ productId, warehouseId, quantity, session });
 
         processedItems.push({
           productId: product._id,
@@ -109,13 +105,18 @@ exports.createSupplierReturn = async (req, res) => {
       );
 
       [returnDoc] = created;
-    }
+      }
+      return returnDoc;
+    });
 
     res.status(201).json({
       message: "Supplier return created successfully",
       supplierReturn: returnDoc,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message, code: error.code });
+    }
     if (
       error.message.includes("Invalid") ||
       error.message.includes("required") ||
@@ -142,13 +143,14 @@ exports.getSupplierReturns = async (req, res) => {
       query.supplierId = supplierId;
     }
     if (warehouseId) {
+      ensureWarehouseAccess(req.user, warehouseId);
       if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
       }
       query.warehouseId = warehouseId;
     }
 
-    const supplierReturns = await SupplierReturn.find(query)
+    const supplierReturns = await SupplierReturn.find(applyWarehouseScope(req.user, query))
       .sort({ createdAt: -1 })
       .populate("supplierId", "name phone")
       .populate("warehouseId", "name")
@@ -178,6 +180,8 @@ exports.getSupplierReturnById = async (req, res) => {
       return res.status(404).json({ message: "Supplier return not found" });
     }
 
+    ensureWarehouseAccess(req.user, supplierReturn.warehouseId);
+
     res.json(supplierReturn);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -196,6 +200,7 @@ exports.deleteSupplierReturn = async (req, res) => {
     {
       const supplierReturn = await SupplierReturn.findById(id).session(session);
       if (!supplierReturn) throw new Error("Supplier return not found");
+      ensureWarehouseAccess(req.user, supplierReturn.warehouseId);
 
       for (const item of supplierReturn.items) {
         await Stock.findOneAndUpdate(

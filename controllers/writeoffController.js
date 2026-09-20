@@ -3,12 +3,15 @@ const Writeoff = require("../models/Writeoff");
 const Warehouse = require("../models/Warehouse");
 const Product = require("../models/Product");
 const Stock = require("../models/Stock");
+const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
+const { decrementStockAtomic, incrementStockAtomic } = require("../utils/stockOps");
+const { withTransaction } = require("../utils/withTransaction");
 
 exports.createWriteoff = async (req, res) => {
-  const session = undefined;
-
   try {
     const { warehouseId, items, reason, note } = req.body;
+
+    ensureWarehouseAccess(req.user, warehouseId);
 
     if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
       return res.status(400).json({ message: "Invalid warehouse ID" });
@@ -20,9 +23,18 @@ exports.createWriteoff = async (req, res) => {
       return res.status(400).json({ message: "reason is required" });
     }
 
-    let writeoffDoc;
+    const seenProductIds = new Set();
+    for (const item of items) {
+      const productId = String(item?.productId || "");
+      if (seenProductIds.has(productId)) {
+        return res.status(400).json({ message: "Duplicate productId in items is not allowed" });
+      }
+      seenProductIds.add(productId);
+    }
 
-    {
+    const writeoffDoc = await withTransaction(async (session) => {
+      let writeoffDoc;
+      {
       const warehouse = await Warehouse.findById(warehouseId).session(session);
       if (!warehouse) throw new Error("Warehouse not found");
 
@@ -51,14 +63,13 @@ exports.createWriteoff = async (req, res) => {
           if (!product.hasPackage || !product.packageQuantity) {
             throw new Error("This product does not support block writeoff");
           }
+          if (!Number.isInteger(inputQuantity)) {
+            throw new Error("Block inputQuantity must be a whole number");
+          }
           quantity = inputQuantity * product.packageQuantity;
         } else {
           quantity = inputQuantity;
         }
-
-        const stock = await Stock.findOne({ productId, warehouseId }).session(session);
-        if (!stock) throw new Error("Stock not found for product in this warehouse");
-        if (stock.quantity < quantity) throw new Error("Insufficient stock for writeoff");
 
         const requestedUnitCost = Number(unitCost);
         const normalizedUnitCost = requestedUnitCost > 0 ? requestedUnitCost : Number(product.purchasePrice);
@@ -69,8 +80,7 @@ exports.createWriteoff = async (req, res) => {
         const totalCost = Number((normalizedUnitCost * quantity).toFixed(2));
         totalAmount += totalCost;
 
-        stock.quantity -= quantity;
-        await stock.save({ session });
+        await decrementStockAtomic({ productId, warehouseId, quantity, session });
 
         processedItems.push({
           productId: product._id,
@@ -97,13 +107,18 @@ exports.createWriteoff = async (req, res) => {
         { session },
       );
       [writeoffDoc] = created;
-    }
+      }
+      return writeoffDoc;
+    });
 
     res.status(201).json({
       message: "Writeoff created successfully",
       writeoff: writeoffDoc,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message, code: error.code });
+    }
     if (
       error.message.includes("Invalid") ||
       error.message.includes("required") ||
@@ -120,10 +135,11 @@ exports.createWriteoff = async (req, res) => {
 
 exports.getWriteoffs = async (req, res) => {
   try {
-    const { warehouseId, reason } = req.query;
+    const { warehouseId, reason, from, to } = req.query;
     const query = {};
 
     if (warehouseId) {
+      ensureWarehouseAccess(req.user, warehouseId);
       if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
       }
@@ -134,13 +150,50 @@ exports.getWriteoffs = async (req, res) => {
       query.reason = { $regex: reason, $options: "i" };
     }
 
-    const writeoffs = await Writeoff.find(query)
-      .sort({ createdAt: -1 })
-      .populate("warehouseId", "name")
-      .populate("createdBy", "fullName role")
-      .populate("items.productId", "name model barcode");
+    if (from || to) {
+      query.createdAt = {};
+      if (from) {
+        const fromDate = new Date(from);
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({ message: "Invalid from date" });
+        }
+        query.createdAt.$gte = fromDate;
+      }
+      if (to) {
+        const toDate = new Date(to);
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({ message: "Invalid to date" });
+        }
+        query.createdAt.$lte = toDate;
+      }
+    }
 
-    res.json(writeoffs);
+    const scoped = applyWarehouseScope(req.user, query);
+    const { paginateQuery } = require("../utils/pagination");
+    const result = await paginateQuery({
+      Model: Writeoff,
+      filter: scoped,
+      queryParams: req.query,
+      defaultSort: { createdAt: -1, _id: -1 },
+      populate: (q) =>
+        q
+          .populate("warehouseId", "name")
+          .populate("createdBy", "fullName role")
+          .populate("items.productId", "name model barcode"),
+    });
+
+    if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
+      return res.json(result.items);
+    }
+
+    res.json({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      pages: result.pages,
+      hasMore: result.hasMore,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -161,6 +214,8 @@ exports.getWriteoffById = async (req, res) => {
     if (!writeoff) {
       return res.status(404).json({ message: "Writeoff not found" });
     }
+
+    ensureWarehouseAccess(req.user, writeoff.warehouseId);
 
     res.json(writeoff);
   } catch (error) {
@@ -200,6 +255,8 @@ exports.updateWriteoff = async (req, res) => {
       return res.status(404).json({ message: "Writeoff not found" });
     }
 
+    ensureWarehouseAccess(req.user, writeoff.warehouseId);
+
     res.json({
       message: "Writeoff updated successfully",
       writeoff,
@@ -210,28 +267,28 @@ exports.updateWriteoff = async (req, res) => {
 };
 
 exports.deleteWriteoff = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid writeoff ID" });
     }
 
-    {
+    await withTransaction(async (session) => {
       const writeoff = await Writeoff.findById(id).session(session);
       if (!writeoff) throw new Error("Writeoff not found");
+      ensureWarehouseAccess(req.user, writeoff.warehouseId);
 
       for (const item of writeoff.items) {
-        await Stock.findOneAndUpdate(
-          { productId: item.productId, warehouseId: writeoff.warehouseId },
-          { $inc: { quantity: item.quantity } },
-          { upsert: true, setDefaultsOnInsert: true, session },
-        );
+        await incrementStockAtomic({
+          productId: item.productId,
+          warehouseId: writeoff.warehouseId,
+          quantity: item.quantity,
+          session,
+        });
       }
 
       await Writeoff.findByIdAndDelete(id).session(session);
-    }
+    });
 
     res.json({ message: "Writeoff deleted successfully" });
   } catch (error) {

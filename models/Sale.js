@@ -46,6 +46,35 @@ const saleItemSchema = new mongoose.Schema(
   { _id: false },
 );
 
+// Soliq/OFD (E-POS) fiscal natijasi. Flutter kassa kompyuteridan
+// lokal E-POSga yuborib, javobni shu yerga saqlaydi.
+const saleFiscalSchema = new mongoose.Schema(
+  {
+    // pending — hali yuborilmagan, success — fiskal o'tdi, failed — xatolik
+    status: {
+      type: String,
+      enum: ["pending", "success", "failed"],
+      default: "pending",
+    },
+    method: {
+      type: String,
+      default: "sale",
+    },
+    terminalId: { type: String, default: "" },
+    receiptSeq: { type: String, default: "" },
+    dateTime: { type: String, default: "" },
+    fiscalSign: { type: String, default: "" },
+    qrCodeUrl: { type: String, default: "" },
+    // E-POS qaytaradigan to'liq chek matni (ba'zan bo'ladi)
+    paycheck: { type: mongoose.Schema.Types.Mixed, default: null },
+    errorMessage: { type: String, default: "" },
+    // E-POSning to'liq xom javobi (debug/audit uchun)
+    rawResponse: { type: mongoose.Schema.Types.Mixed, default: null },
+    submittedAt: { type: Date, default: null },
+  },
+  { _id: false },
+);
+
 const saleSchema = new mongoose.Schema(
   {
     warehouseId: {
@@ -106,6 +135,11 @@ const saleSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    // Soliq/OFD fiskal natijasi (E-POS orqali). null — hali fiskal qilinmagan.
+    fiscal: {
+      type: saleFiscalSchema,
+      default: null,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -115,8 +149,9 @@ const saleSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-saleSchema.index({ warehouseId: 1, createdAt: -1 });
-saleSchema.index({ createdBy: 1, createdAt: -1 });
+saleSchema.index({ createdAt: -1, _id: -1 });
+saleSchema.index({ warehouseId: 1, createdAt: -1, _id: -1 });
+saleSchema.index({ createdBy: 1, createdAt: -1, _id: -1 });
 saleSchema.index({ shiftId: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Sale", saleSchema);

@@ -1,15 +1,33 @@
 const mongoose = require("mongoose");
+const ExcelJS = require("exceljs");
 const Sale = require("../models/Sale");
 const SaleReturn = require("../models/SaleReturn");
 const Product = require("../models/Product");
+const FiscalProduct = require("../models/FiscalProduct");
 const Stock = require("../models/Stock");
 const Warehouse = require("../models/Warehouse");
 const Shop = require("../models/Shop");
 const ShopQuickProduct = require("../models/ShopQuickProduct");
+const Category = require("../models/Category");
 const Client = require("../models/Client");
 const User = require("../models/User");
 const Shift = require("../models/Shift");
 const { requireOpenCashierShift, getOpenCashierShift, resolveCashierShop } = require("../utils/shiftHelper");
+const { loadGlobalSetting } = require("../utils/deletionCodeGuard");
+
+const SHOP_WAREHOUSE_CACHE_TTL_MS = 15000;
+const shopWarehouseCache = new Map();
+const BARCODE_LOOKUP_CACHE_TTL_MS = 10000;
+const OFFLINE_CATALOG_CACHE_TTL_MS = 10000;
+const SALE_SEARCH_CACHE_TTL_MS = 10000;
+const TOP_PRODUCTS_AVAILABLE_CACHE_TTL_MS = 10000;
+const TOP_PRODUCTS_CACHE_TTL_MS = 15000;
+const barcodeLookupCache = new Map();
+const offlineCatalogCache = new Map();
+const saleSearchCache = new Map();
+const topProductsAvailableCache = new Map();
+const topProductsStatsCache = new Map();
+const FISCAL_CODE_REGEX = /^\d{17}$/;
 
 const round2 = (value) => Number(Number(value).toFixed(2));
 const getSaleInitialPaidAmount = (sale) =>
@@ -220,6 +238,88 @@ const resolveUnitSellPriceByType = (product, priceType, fallbackPrice) => {
   throw new Error("Invalid priceType. Use 'retail', 'wholesale', 'mini' or 'custom'");
 };
 
+const composeFiscalItemsFromCatalog = (totalAmountSom, fiscalProducts) => {
+  const totalTiyin = toTiyin(totalAmountSom);
+  if (totalTiyin <= 0) {
+    throw new Error("Sale totalAmount must be greater than 0");
+  }
+
+  const normalized = fiscalProducts
+    .map((product) => {
+      const classCode = String(product.fiscalClassCode || "").trim();
+      const packageCode = String(product.fiscalPackageCode || "").trim();
+      const vatPercent = Number(product.fiscalVatPercent || 0);
+      const catalogPriceTiyin = toTiyin(product.sellPrice || 0);
+
+      return {
+        product,
+        classCode,
+        packageCode,
+        vatPercent,
+        catalogPriceTiyin,
+      };
+    })
+    .filter(({ classCode, catalogPriceTiyin }) => {
+      return FISCAL_CODE_REGEX.test(classCode) && catalogPriceTiyin > 0;
+    })
+    .sort((a, b) => b.catalogPriceTiyin - a.catalogPriceTiyin);
+
+  if (normalized.length === 0) {
+    const err = new Error("Active fiscal products yo'q");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let remainingTiyin = totalTiyin;
+  const items = [];
+
+  for (const entry of normalized) {
+    if (remainingTiyin <= 0) break;
+
+    const quantityWhole = Math.floor(remainingTiyin / entry.catalogPriceTiyin);
+    if (quantityWhole <= 0) continue;
+
+    items.push({
+      price: entry.catalogPriceTiyin,
+      discount: 0,
+      barcode: entry.product.barcode || "",
+      amount: quantityWhole * 1000,
+      vatPercent: entry.vatPercent,
+      vat: entry.vatPercent > 0
+        ? Math.round((entry.catalogPriceTiyin * quantityWhole * entry.vatPercent) / (100 + entry.vatPercent))
+        : 0,
+      name: entry.product.name || "",
+      classCode: entry.classCode,
+      packageCode: entry.packageCode,
+      other: 0,
+      ownerType: 0,
+    });
+
+    remainingTiyin -= quantityWhole * entry.catalogPriceTiyin;
+  }
+
+  if (remainingTiyin > 0) {
+    const fallback = normalized[0];
+    items.push({
+      price: remainingTiyin,
+      discount: 0,
+      barcode: fallback.product.barcode || "",
+      amount: 1000,
+      vatPercent: fallback.vatPercent,
+      vat: fallback.vatPercent > 0
+        ? Math.round((remainingTiyin * fallback.vatPercent) / (100 + fallback.vatPercent))
+        : 0,
+      name: fallback.product.name || "",
+      classCode: fallback.classCode,
+      packageCode: fallback.packageCode,
+      other: 0,
+      ownerType: 0,
+    });
+  }
+
+  return items;
+};
+
 const buildReportRange = ({ date, from, to }) => {
   if (date) {
     const start = toDate(date, false);
@@ -243,9 +343,132 @@ const buildReportRange = ({ date, from, to }) => {
   };
 };
 
-exports.createSale = async (req, res) => {
-  const session = undefined;
+const formatDateTime = (date) => {
+  if (!date) return "";
+  const value = new Date(date);
+  if (Number.isNaN(value.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}`;
+};
 
+const formatDateOnly = (date) => {
+  if (!date) return "";
+  const value = new Date(date);
+  if (Number.isNaN(value.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+};
+
+const formatUzDate = (date) => {
+  if (!date) return "";
+  const value = new Date(date);
+  if (Number.isNaN(value.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${pad(value.getDate())}.${pad(value.getMonth() + 1)}.${value.getFullYear()}`;
+};
+
+const sanitizeFilePart = (value) =>
+  String(value || "KONSTAVAR")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .slice(0, 80);
+
+const getCachedValue = (cache, key) => {
+  const hit = cache.get(key);
+  if (hit && hit.expiresAt > Date.now()) {
+    return hit.value;
+  }
+  if (hit) {
+    cache.delete(key);
+  }
+  return null;
+};
+
+const setCachedValue = (cache, key, value, ttlMs) => {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+};
+
+const moneyFormat = '#,##0';
+const quantityFormat = '#,##0.###';
+
+const applyThinBorder = (cell) => {
+  cell.border = {
+    top: { style: "thin", color: { argb: "FFD9E2F3" } },
+    left: { style: "thin", color: { argb: "FFD9E2F3" } },
+    bottom: { style: "thin", color: { argb: "FFD9E2F3" } },
+    right: { style: "thin", color: { argb: "FFD9E2F3" } },
+  };
+};
+
+const styleHeaderRow = (row) => {
+  row.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF244062" },
+    };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    applyThinBorder(cell);
+  });
+};
+
+const styleDataRow = (row) => {
+  row.eachCell((cell) => {
+    cell.alignment = { vertical: "middle", wrapText: true };
+    applyThinBorder(cell);
+  });
+};
+
+const styleSheet = (worksheet) => {
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  worksheet.eachRow((row) => {
+    row.height = row.number === 1 ? 18 : 15.75;
+  });
+};
+
+const buildSalesReportQuery = async ({ date, from, to, warehouseId, cashierId, shopId }) => {
+  const range = buildReportRange({ date, from, to });
+  const query = {
+    createdAt: { $gte: range.from, $lte: range.to },
+  };
+
+  if (warehouseId) {
+    if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
+      throw new Error("Invalid warehouseId query");
+    }
+    query.warehouseId = new mongoose.Types.ObjectId(warehouseId);
+  }
+
+  if (cashierId) {
+    if (!mongoose.Types.ObjectId.isValid(cashierId)) {
+      throw new Error("Invalid cashierId query");
+    }
+    query.createdBy = new mongoose.Types.ObjectId(cashierId);
+  }
+
+  if (shopId) {
+    if (!mongoose.Types.ObjectId.isValid(shopId)) {
+      throw new Error("Invalid shopId query");
+    }
+    const shop = await Shop.findById(shopId).select("warehouseId").lean();
+    if (!shop) {
+      const err = new Error("Shop not found");
+      err.statusCode = 404;
+      throw err;
+    }
+    query.warehouseId = new mongoose.Types.ObjectId(shop.warehouseId);
+  }
+
+  return { query, range };
+};
+
+exports.createSale = async (req, res) => {
+  const { withTransaction } = require("../utils/withTransaction");
   try {
     const {
       warehouseId: requestedWarehouseId,
@@ -271,9 +494,9 @@ exports.createSale = async (req, res) => {
       return res.status(400).json({ message: "discount must be a non-negative number" });
     }
 
-    let saleDoc;
-
-    {
+    const saleDoc = await withTransaction(async (session) => {
+      let saleDoc;
+      {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
       const normalizedPaymentType = paymentType || "cash";
@@ -411,25 +634,40 @@ exports.createSale = async (req, res) => {
 
       const totalAmount = round2(subtotal - normalizedDiscount);
       if (totalAmount <= 0) {
-        throw new Error("totalAmount must be greater than 0");
+        const err = new Error("totalAmount must be greater than 0");
+        err.statusCode = 400;
+        throw err;
       }
 
-      for (const [productId, requiredQty] of requiredByProduct.entries()) {
-        const stock = await Stock.findOne({ productId, warehouseId }).session(session);
-        if (!stock) {
-          throw new Error("Stock not found for one of products in this warehouse");
+      const decrementedProductIds = [];
+      try {
+        for (const [productId, requiredQty] of requiredByProduct.entries()) {
+          const updated = await Stock.findOneAndUpdate(
+            { productId, warehouseId, quantity: { $gte: requiredQty } },
+            { $inc: { quantity: -requiredQty } },
+            { new: true, session },
+          );
+          if (!updated) {
+            const current = await Stock.findOne({ productId, warehouseId }).session(session).lean();
+            const err = new Error(
+              current
+                ? `Insufficient stock for one of products (available ${current.quantity}, requested ${requiredQty})`
+                : "Stock not found for one of products in this warehouse",
+            );
+            err.statusCode = 409;
+            throw err;
+          }
+          decrementedProductIds.push({ productId, requiredQty });
         }
-        if (Number(stock.quantity) < requiredQty) {
-          throw new Error("Insufficient stock for one of products");
+      } catch (stockErr) {
+        for (const { productId, requiredQty } of decrementedProductIds) {
+          await Stock.findOneAndUpdate(
+            { productId, warehouseId },
+            { $inc: { quantity: requiredQty } },
+            { session },
+          ).catch(() => {});
         }
-      }
-
-      for (const [productId, requiredQty] of requiredByProduct.entries()) {
-        await Stock.findOneAndUpdate(
-          { productId, warehouseId },
-          { $inc: { quantity: -requiredQty } },
-          { session },
-        );
+        throw stockErr;
       }
 
       let payment;
@@ -526,13 +764,18 @@ exports.createSale = async (req, res) => {
       );
 
       [saleDoc] = createdSales;
-    }
+      }
+      return saleDoc;
+    });
 
     res.status(201).json({
       message: "Sale created successfully",
       sale: saleDoc,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message, code: error.code });
+    }
     if (
       error.message.includes("Invalid") ||
       error.message.includes("required") ||
@@ -552,11 +795,58 @@ exports.createSale = async (req, res) => {
 
 exports.getOfflineSaleCatalog = async (req, res) => {
   try {
-    const { shop, warehouseId } = await resolveShopForSale(req.user);
-    const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+    let shop = null;
+    let shopWarehouse = null;
+
+    if (req.user?.role === "cashier") {
+      const shopId = req.user.shopId?._id || req.user.shopId;
+      if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) {
+        return res.status(400).json({ message: "Cashier has no assigned shop" });
+      }
+
+      const cached = shopWarehouseCache.get(String(shopId));
+      if (cached && cached.expiresAt > Date.now()) {
+        shop = cached.shop;
+        shopWarehouse = cached.shopWarehouse;
+      } else {
+        shop = await Shop.findOne({ _id: shopId, isActive: true })
+          .select("_id name warehouseId")
+          .lean();
+
+        if (!shop) {
+          return res.status(400).json({ message: "Assigned shop not found or inactive" });
+        }
+
+        shopWarehouse = await Warehouse.findById(shop.warehouseId)
+          .select("_id name")
+          .lean();
+
+        if (!shopWarehouse) {
+          return res.status(400).json({ message: "Warehouse not found" });
+        }
+
+        shopWarehouseCache.set(String(shopId), {
+          shop,
+          shopWarehouse,
+          expiresAt: Date.now() + SHOP_WAREHOUSE_CACHE_TTL_MS,
+        });
+      }
+    } else {
+      const resolved = await resolveShopForSale(req.user);
+      shop = resolved.shop;
+      const ensured = await ensureWarehouseIsActiveShopWarehouse(resolved.warehouseId);
+      shopWarehouse = ensured.warehouse;
+    }
+
+    const offlineCacheKey = `${String(shop._id)}:${String(shopWarehouse._id)}`;
+    const cachedCatalog = getCachedValue(offlineCatalogCache, offlineCacheKey);
+    if (cachedCatalog) {
+      return res.json(cachedCatalog);
+    }
 
     const [stocks, quickRows] = await Promise.all([
       Stock.find({ warehouseId: shopWarehouse._id })
+        .select("productId quantity updatedAt")
         .populate({
           path: "productId",
           select:
@@ -598,7 +888,7 @@ exports.getOfflineSaleCatalog = async (req, res) => {
         return String(a.product?.name || "").localeCompare(String(b.product?.name || ""));
       });
 
-    return res.json({
+    const response = {
       shop: { _id: shop._id, name: shop.name },
       warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
       total: items.length,
@@ -606,7 +896,11 @@ exports.getOfflineSaleCatalog = async (req, res) => {
         .filter((row) => row.productId)
         .map((row) => String(row.productId)),
       items,
-    });
+    };
+
+    setCachedValue(offlineCatalogCache, offlineCacheKey, response, OFFLINE_CATALOG_CACHE_TTL_MS);
+
+    return res.json(response);
   } catch (error) {
     if (
       error.message.includes("Invalid") ||
@@ -627,12 +921,26 @@ exports.getSales = async (req, res) => {
     const query = {};
 
     if (req.user?.role === "cashier") {
-      const activeShift = await getOpenCashierShift(req.user);
-      if (!activeShift) {
-        return res.status(400).json({ message: "Open shift required" });
+      let targetShift;
+      if (shiftId) {
+        if (!mongoose.Types.ObjectId.isValid(shiftId)) {
+          return res.status(400).json({ message: "Invalid shiftId query" });
+        }
+        targetShift = await Shift.findById(shiftId).select("cashierId warehouseId").lean();
+        if (!targetShift) {
+          return res.status(404).json({ message: "Shift not found" });
+        }
+        if (String(targetShift.cashierId) !== String(req.user._id)) {
+          return res.status(403).json({ message: "You can access only your own shift sales" });
+        }
+      } else {
+        targetShift = await getOpenCashierShift(req.user);
+        if (!targetShift) {
+          return res.status(400).json({ message: "Open shift required" });
+        }
       }
-      query.warehouseId = activeShift.warehouseId;
-      query.shiftId = activeShift._id;
+      query.warehouseId = targetShift.warehouseId;
+      query.shiftId = targetShift._id;
     } else if (warehouseId) {
       if (!mongoose.Types.ObjectId.isValid(warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
@@ -668,6 +976,16 @@ exports.getSales = async (req, res) => {
       query.paymentType = paymentType;
     }
 
+    // Fiskal holati bo'yicha filtr (POS sotuv tarixida faqat soliqqa
+    // yuborilganlarni — fiscalStatus=success — ko'rsatish uchun).
+    if (req.query.fiscalStatus) {
+      const fiscalStatus = String(req.query.fiscalStatus);
+      if (!["success", "failed", "pending"].includes(fiscalStatus)) {
+        return res.status(400).json({ message: "Invalid fiscalStatus query" });
+      }
+      query["fiscal.status"] = fiscalStatus;
+    }
+
     if (shiftId && req.user?.role !== "cashier") {
       if (!mongoose.Types.ObjectId.isValid(shiftId)) {
         return res.status(400).json({ message: "Invalid shiftId query" });
@@ -694,22 +1012,41 @@ exports.getSales = async (req, res) => {
       if (toDateValue) query.createdAt.$lte = toDateValue;
     }
 
-    let normalizedLimit = Number(limit);
-    if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
-      normalizedLimit = 100;
+    if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
+      const sales = await Sale.find(query)
+        .sort({ createdAt: -1, _id: -1 })
+        .populate("warehouseId", "name")
+        .populate("clientId", "name phone")
+        .populate("createdBy", "fullName role")
+        .populate("shiftId", "status openedAt closedAt")
+        .populate("items.productId", "name model barcode");
+
+      return res.json(sales);
     }
-    normalizedLimit = Math.min(normalizedLimit, 1000);
 
-    const sales = await Sale.find(query)
-      .sort({ createdAt: -1 })
-      .limit(normalizedLimit)
-      .populate("warehouseId", "name")
-      .populate("clientId", "name phone")
-      .populate("createdBy", "fullName role")
-      .populate("shiftId", "status openedAt closedAt")
-      .populate("items.productId", "name model barcode");
+    const { paginateQuery } = require("../utils/pagination");
+    const result = await paginateQuery({
+      Model: Sale,
+      filter: query,
+      queryParams: req.query,
+      defaultSort: { createdAt: -1, _id: -1 },
+      populate: (q) =>
+        q
+          .populate("warehouseId", "name")
+          .populate("clientId", "name phone")
+          .populate("createdBy", "fullName role")
+          .populate("shiftId", "status openedAt closedAt")
+          .populate("items.productId", "name model barcode"),
+    });
 
-    res.json(sales);
+    res.json({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      pages: result.pages,
+      hasMore: result.hasMore,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -783,6 +1120,32 @@ exports.getSalesHistory = async (req, res) => {
             clickTotal: { $sum: "$clickAmount" },
             creditTotal: { $sum: { $cond: [{ $eq: ["$paymentType", "credit"] }, "$dueAmount", 0] } },
             paidAmountTotal: { $sum: "$paidAmount" },
+            fiscalTotal: {
+              $sum: { $cond: [{ $eq: ["$fiscal.status", "success"] }, "$totalAmount", 0] },
+            },
+            fiscalCashTotal: {
+              $sum: { $cond: [{ $eq: ["$fiscal.status", "success"] }, "$cashAmount", 0] },
+            },
+            fiscalCardTotal: {
+              $sum: { $cond: [{ $eq: ["$fiscal.status", "success"] }, "$cardAmount", 0] },
+            },
+            fiscalClickTotal: {
+              $sum: { $cond: [{ $eq: ["$fiscal.status", "success"] }, "$clickAmount", 0] },
+            },
+            fiscalCreditTotal: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$fiscal.status", "success"] },
+                      { $eq: ["$paymentType", "credit"] },
+                    ],
+                  },
+                  "$dueAmount",
+                  0,
+                ],
+              },
+            },
           },
         },
       ]),
@@ -878,6 +1241,11 @@ exports.getSalesHistory = async (req, res) => {
       clickTotal: 0,
       creditTotal: 0,
       paidAmountTotal: 0,
+      fiscalTotal: 0,
+      fiscalCashTotal: 0,
+      fiscalCardTotal: 0,
+      fiscalClickTotal: 0,
+      fiscalCreditTotal: 0,
     };
 
     const cashierIds = cashierRows.map((row) => row._id).filter(Boolean);
@@ -1034,6 +1402,11 @@ exports.getSalesHistory = async (req, res) => {
         clickTotal: round2(summary.clickTotal),
         creditTotal: round2(summary.creditTotal),
         paidAmountTotal: round2(summary.paidAmountTotal),
+        fiscalTotal: round2(summary.fiscalTotal),
+        fiscalCashTotal: round2(summary.fiscalCashTotal),
+        fiscalCardTotal: round2(summary.fiscalCardTotal),
+        fiscalClickTotal: round2(summary.fiscalClickTotal),
+        fiscalCreditTotal: round2(summary.fiscalCreditTotal),
         averageCheck: totalSalesCount > 0 ? round2(totalSalesAmount / totalSalesCount) : 0,
       },
       scope: {
@@ -1052,6 +1425,467 @@ exports.getSalesHistory = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
 
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.exportSalesHistoryExcel = async (req, res) => {
+  try {
+    const { date, from, to, warehouseId, cashierId, shopId } = req.query;
+    const { query, range } = await buildSalesReportQuery({
+      date,
+      from,
+      to,
+      warehouseId,
+      cashierId,
+      shopId,
+    });
+
+    const sales = await Sale.find(query)
+      .select(
+        "warehouseId createdBy clientId items.productId items.quantity items.unitSellPrice " +
+          "items.total totalAmount cashAmount cardAmount clickAmount dueAmount paymentType note createdAt",
+      )
+      .sort({ createdAt: -1, _id: -1 })
+      .lean();
+
+    const productIds = new Set();
+    const categoryIds = new Set();
+    const warehouseIds = new Set();
+    const cashierIds = new Set();
+    const clientIds = new Set();
+    for (const sale of sales) {
+      if (sale.warehouseId) warehouseIds.add(String(sale.warehouseId));
+      if (sale.createdBy) cashierIds.add(String(sale.createdBy));
+      if (sale.clientId) clientIds.add(String(sale.clientId));
+      for (const item of sale.items || []) {
+        if (item.productId) productIds.add(String(item.productId));
+      }
+    }
+
+    const [products, warehouses, cashiers, clients, stockRows, shopRows] = await Promise.all([
+      productIds.size
+        ? Product.find({ _id: { $in: [...productIds] } })
+            .select("name categoryId")
+            .lean()
+        : [],
+      warehouseIds.size
+        ? Warehouse.find({ _id: { $in: [...warehouseIds] } })
+            .select("name")
+            .lean()
+        : [],
+      cashierIds.size
+        ? User.find({ _id: { $in: [...cashierIds] } })
+            .select("fullName")
+            .lean()
+        : [],
+      clientIds.size
+        ? Client.find({ _id: { $in: [...clientIds] } })
+            .select("name")
+            .lean()
+        : [],
+      productIds.size
+        ? Stock.find({
+            productId: { $in: [...productIds] },
+            warehouseId: { $in: [...warehouseIds] },
+          })
+            .select("productId warehouseId quantity")
+            .lean()
+        : [],
+      warehouseIds.size
+        ? Shop.find({ warehouseId: { $in: [...warehouseIds] } })
+            .select("name warehouseId")
+            .lean()
+        : [],
+    ]);
+
+    for (const product of products) {
+      if (product?.categoryId) categoryIds.add(String(product.categoryId));
+    }
+
+    const categories = categoryIds.size
+      ? await Category.find({ _id: { $in: [...categoryIds] } })
+          .select("name")
+          .lean()
+      : [];
+
+    const categoryMap = new Map(categories.map((category) => [String(category._id), category.name]));
+    const warehouseMap = new Map(warehouses.map((warehouse) => [String(warehouse._id), warehouse]));
+    const cashierMap = new Map(cashiers.map((cashier) => [String(cashier._id), cashier]));
+    const clientMap = new Map(clients.map((client) => [String(client._id), client]));
+    const productMap = new Map(products.map((product) => [String(product._id), product]));
+    const shopByWarehouseMap = new Map(
+      shopRows.map((shop) => [String(shop.warehouseId), shop.name]),
+    );
+    const stockMap = new Map();
+    for (const stock of stockRows) {
+      const key = `${stock.productId}:${stock.warehouseId}`;
+      stockMap.set(key, Number(stock.quantity || 0));
+    }
+
+    const summary = {
+      totalSalesCount: sales.length,
+      totalSalesAmount: 0,
+      cashTotal: 0,
+      cardTotal: 0,
+      clickTotal: 0,
+      creditTotal: 0,
+    };
+
+    const productSummaryMap = new Map();
+    const cashierSummaryMap = new Map();
+    const orderRows = [];
+    const saleNumberMap = new Map();
+
+    sales.forEach((sale, index) => {
+      const saleId = String(sale._id);
+      const saleNumber = sales.length - index;
+      saleNumberMap.set(saleId, saleNumber);
+
+      summary.totalSalesAmount = round2(summary.totalSalesAmount + Number(sale.totalAmount || 0));
+      summary.cashTotal = round2(summary.cashTotal + Number(sale.cashAmount || 0));
+      summary.cardTotal = round2(summary.cardTotal + Number(sale.cardAmount || 0));
+      summary.clickTotal = round2(summary.clickTotal + Number(sale.clickAmount || 0));
+      summary.creditTotal = round2(summary.creditTotal + Number(sale.dueAmount || 0));
+
+      const cashierIdValue = sale.createdBy ? String(sale.createdBy) : "unknown";
+      const cashierName = cashierMap.get(cashierIdValue)?.fullName || "Noma'lum";
+      const cashierBucket =
+        cashierSummaryMap.get(cashierIdValue) || {
+          cashierName,
+          salesCount: 0,
+          totalSalesAmount: 0,
+          cashTotal: 0,
+          cardTotal: 0,
+          clickTotal: 0,
+          creditTotal: 0,
+        };
+      cashierBucket.salesCount += 1;
+      cashierBucket.totalSalesAmount = round2(cashierBucket.totalSalesAmount + Number(sale.totalAmount || 0));
+      cashierBucket.cashTotal = round2(cashierBucket.cashTotal + Number(sale.cashAmount || 0));
+      cashierBucket.cardTotal = round2(cashierBucket.cardTotal + Number(sale.cardAmount || 0));
+      cashierBucket.clickTotal = round2(cashierBucket.clickTotal + Number(sale.clickAmount || 0));
+      cashierBucket.creditTotal = round2(cashierBucket.creditTotal + Number(sale.dueAmount || 0));
+      cashierSummaryMap.set(cashierIdValue, cashierBucket);
+
+      for (const item of sale.items || []) {
+        const productDoc = item.productId ? productMap.get(String(item.productId)) : null;
+        const productId = item.productId
+          ? String(item.productId)
+          : `unknown:${productDoc?.name || ""}`;
+        const categoryName = productDoc?.categoryId
+          ? categoryMap.get(String(productDoc.categoryId)) || ""
+          : "";
+        const quantity = Number(item.quantity || 0);
+        const total = Number(item.total || 0);
+        const warehouseKey = String(sale.warehouseId || "");
+
+        const productBucket =
+          productSummaryMap.get(productId) || {
+            productName: productDoc?.name || "Noma'lum mahsulot",
+            categoryName,
+            soldQuantity: 0,
+            soldAmount: 0,
+            salesIds: new Set(),
+            currentStock: stockMap.get(`${productId}:${warehouseKey}`),
+          };
+
+        productBucket.soldQuantity = round2(productBucket.soldQuantity + quantity);
+        productBucket.soldAmount = round2(productBucket.soldAmount + total);
+        productBucket.salesIds.add(saleId);
+        if (!productBucket.categoryName && categoryName) {
+          productBucket.categoryName = categoryName;
+        }
+        if (productBucket.currentStock === undefined) {
+          productBucket.currentStock = stockMap.get(`${productId}:${warehouseKey}`);
+        }
+        productSummaryMap.set(productId, productBucket);
+
+        orderRows.push({
+          date: sale.createdAt,
+          saleNumber,
+          productName: productDoc?.name || "Noma'lum mahsulot",
+          categoryName,
+          quantity,
+          unitPrice: round2(item.unitSellPrice || 0),
+          total: round2(total),
+          paymentType: sale.paymentType || "",
+          note: sale.note || clientMap.get(String(sale.clientId || ""))?.name || "",
+          cashierName,
+          saleId,
+        });
+      }
+    });
+
+    const productRows = [...productSummaryMap.values()]
+      .map((item, index) => ({
+        index: index + 1,
+        productName: item.productName,
+        categoryName: item.categoryName,
+        unitPrice: item.soldQuantity > 0 ? round2(item.soldAmount / item.soldQuantity) : 0,
+        soldQuantity: item.soldQuantity,
+        soldAmount: item.soldAmount,
+        salesCount: item.salesIds.size,
+        currentStock: item.currentStock,
+      }))
+      .sort((a, b) => b.soldAmount - a.soldAmount || b.soldQuantity - a.soldQuantity)
+      .map((item, index) => ({ ...item, index: index + 1 }));
+
+    const cashierRows = [...cashierSummaryMap.values()]
+      .sort((a, b) => b.totalSalesAmount - a.totalSalesAmount || b.salesCount - a.salesCount)
+      .map((item, index) => ({ ...item, index: index + 1 }));
+
+    const firstWarehouse = sales[0]?.warehouseId ? warehouseMap.get(String(sales[0].warehouseId)) : null;
+    const warehouseName =
+      (warehouseId && firstWarehouse?.name) ||
+      (warehouseIds.size === 1
+        ? firstWarehouse?.name || [...warehouseIds][0]
+        : warehouseIds.size > 1
+          ? "Barcha filiallar"
+          : "KONSTAVAR");
+    const shopName =
+      warehouseIds.size === 1
+        ? shopByWarehouseMap.get([...warehouseIds][0]) || warehouseName
+        : warehouseName;
+    const periodLabel = `${formatUzDate(range.from)} - ${formatUzDate(range.to)}`;
+    const exportTime = formatDateTime(new Date());
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "KONSTAVAR";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const titleFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F4E78" } };
+    const lightFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEAF2F8" } };
+
+    const reportSheet = workbook.addWorksheet("Hisobot");
+    reportSheet.mergeCells("B1:I2");
+    reportSheet.getCell("B1").value = "KONSTAVAR buxgalteriya hisoboti";
+    reportSheet.getCell("B1").font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+    reportSheet.getCell("B1").fill = titleFill;
+    reportSheet.getCell("B1").alignment = { vertical: "middle", horizontal: "center" };
+
+    const summaryLines = [
+      ["Filial", shopName],
+      ["Sana", periodLabel],
+      ["Кун бошига махсулот сони", ""],
+      ["Buyurtmalar soni", summary.totalSalesCount],
+      ["Sotilgan mahsulot turlari", productRows.length],
+      ["Колган махсулот сони", productRows.reduce((sum, row) => sum + Number(row.currentStock || 0), 0)],
+      ["Jami tushum", summary.totalSalesAmount],
+      ["Naqd", summary.cashTotal],
+      ["Karta", summary.cardTotal],
+      ["Click", summary.clickTotal],
+      ["Qarz", summary.creditTotal],
+      ["Eksport vaqti", exportTime],
+    ];
+
+    summaryLines.forEach(([label, value], index) => {
+      const rowNumber = index + 3;
+      reportSheet.getCell(`B${rowNumber}`).value = label;
+      reportSheet.getCell(`C${rowNumber}`).value = value;
+      reportSheet.getCell(`B${rowNumber}`).font = { bold: true };
+      reportSheet.getCell(`B${rowNumber}`).fill = lightFill;
+      reportSheet.getCell(`C${rowNumber}`).fill = lightFill;
+      reportSheet.getCell(`C${rowNumber}`).numFmt = typeof value === "number" ? moneyFormat : undefined;
+      applyThinBorder(reportSheet.getCell(`B${rowNumber}`));
+      applyThinBorder(reportSheet.getCell(`C${rowNumber}`));
+    });
+
+    const reportHeaderRow = 17;
+    reportSheet.getCell(`A${reportHeaderRow}`).value = "№";
+    reportSheet.getCell(`B${reportHeaderRow}`).value = "Mahsulot nomi";
+    reportSheet.getCell(`C${reportHeaderRow}`).value = "Кун бошига колдик";
+    reportSheet.getCell(`D${reportHeaderRow}`).value = "Kategoriya";
+    reportSheet.getCell(`E${reportHeaderRow}`).value = "Narxi";
+    reportSheet.getCell(`F${reportHeaderRow}`).value = "Sotilgan soni";
+    reportSheet.getCell(`G${reportHeaderRow}`).value = "Jami summa";
+    reportSheet.getCell(`H${reportHeaderRow}`).value = "Buyurtma soni";
+    reportSheet.getCell(`I${reportHeaderRow}`).value = "Кун якунига колдик";
+    styleHeaderRow(reportSheet.getRow(reportHeaderRow));
+    reportSheet.getCell("A16").value = "Mahsulotlar bo'yicha sotuv";
+    reportSheet.getCell("A16").font = { bold: true, size: 13 };
+
+    productRows.forEach((row, index) => {
+      const rowNumber = reportHeaderRow + 1 + index;
+      reportSheet.getRow(rowNumber).values = [
+        row.index,
+        row.productName,
+        "",
+        row.categoryName,
+        row.unitPrice,
+        row.soldQuantity,
+        row.soldAmount,
+        row.salesCount,
+        row.currentStock ?? "",
+      ];
+      reportSheet.getCell(`E${rowNumber}`).numFmt = moneyFormat;
+      reportSheet.getCell(`F${rowNumber}`).numFmt = quantityFormat;
+      reportSheet.getCell(`G${rowNumber}`).numFmt = moneyFormat;
+      reportSheet.getCell(`I${rowNumber}`).numFmt = quantityFormat;
+      styleDataRow(reportSheet.getRow(rowNumber));
+    });
+
+    reportSheet.columns = [
+      { width: 7 },
+      { width: 32 },
+      { width: 20 },
+      { width: 20 },
+      { width: 12 },
+      { width: 15 },
+      { width: 16 },
+      { width: 16 },
+      { width: 16 },
+    ];
+
+    const summarySheet = workbook.addWorksheet("Xulosa");
+    [
+      ["KONSTAVAR buxgalteriya hisoboti", ""],
+      ["Filial", shopName],
+      ["Sana", periodLabel],
+      ["Buyurtmalar soni", summary.totalSalesCount],
+      ["Sotilgan mahsulot turlari", productRows.length],
+      ["Jami tushum", summary.totalSalesAmount],
+      ["Naqd", summary.cashTotal],
+      ["Karta", summary.cardTotal],
+      ["Click", summary.clickTotal],
+      ["Qarz", summary.creditTotal],
+      ["Eksport vaqti", exportTime],
+    ].forEach((values, index) => {
+      const row = summarySheet.addRow(values);
+      if (index === 0) row.font = { bold: true, size: 14 };
+      if (typeof values[1] === "number") summarySheet.getCell(`B${index + 1}`).numFmt = moneyFormat;
+      styleDataRow(row);
+    });
+    summarySheet.columns = [{ width: 34 }, { width: 28 }];
+
+    const productsSheet = workbook.addWorksheet("Mahsulotlar");
+    productsSheet.addRow(["№", "Mahsulot nomi", "Kategoriya", "Narxi", "Sotilgan soni", "Jami summa", "Buyurtma soni"]);
+    styleHeaderRow(productsSheet.getRow(1));
+    productRows.forEach((row) => {
+      const sheetRow = productsSheet.addRow([
+        row.index,
+        row.productName,
+        row.categoryName,
+        row.unitPrice,
+        row.soldQuantity,
+        row.soldAmount,
+        row.salesCount,
+      ]);
+      sheetRow.getCell(4).numFmt = moneyFormat;
+      sheetRow.getCell(5).numFmt = quantityFormat;
+      sheetRow.getCell(6).numFmt = moneyFormat;
+      styleDataRow(sheetRow);
+    });
+    productsSheet.columns = [
+      { width: 7 },
+      { width: 34 },
+      { width: 22 },
+      { width: 15 },
+      { width: 15 },
+      { width: 17 },
+      { width: 15 },
+    ];
+
+    const ordersSheet = workbook.addWorksheet("Buyurtmalar");
+    ordersSheet.addRow([
+      "№",
+      "Sana",
+      "Sotuv raqami",
+      "Mahsulot",
+      "Kategoriya",
+      "Soni",
+      "Narxi",
+      "Jami",
+      "To'lov turi",
+      "Izoh",
+      "Kassir",
+      "Sotuv ID",
+    ]);
+    styleHeaderRow(ordersSheet.getRow(1));
+    orderRows.forEach((row, index) => {
+      const sheetRow = ordersSheet.addRow([
+        index + 1,
+        formatDateTime(row.date),
+        row.saleNumber,
+        row.productName,
+        row.categoryName,
+        row.quantity,
+        row.unitPrice,
+        row.total,
+        row.paymentType,
+        row.note,
+        row.cashierName,
+        row.saleId,
+      ]);
+      sheetRow.getCell(6).numFmt = quantityFormat;
+      sheetRow.getCell(7).numFmt = moneyFormat;
+      sheetRow.getCell(8).numFmt = moneyFormat;
+      styleDataRow(sheetRow);
+    });
+    ordersSheet.columns = [
+      { width: 7 },
+      { width: 19 },
+      { width: 14 },
+      { width: 34 },
+      { width: 22 },
+      { width: 11 },
+      { width: 15 },
+      { width: 17 },
+      { width: 13 },
+      { width: 18 },
+      { width: 22 },
+      { width: 28 },
+    ];
+
+    const cashiersSheet = workbook.addWorksheet("Kassirlar");
+    cashiersSheet.addRow(["№", "Kassir", "Buyurtmalar", "Savdo", "Naqd", "Karta", "Click", "Qarz"]);
+    styleHeaderRow(cashiersSheet.getRow(1));
+    cashierRows.forEach((row) => {
+      const sheetRow = cashiersSheet.addRow([
+        row.index,
+        row.cashierName,
+        row.salesCount,
+        row.totalSalesAmount,
+        row.cashTotal,
+        row.cardTotal,
+        row.clickTotal,
+        row.creditTotal,
+      ]);
+      [4, 5, 6, 7, 8].forEach((column) => {
+        sheetRow.getCell(column).numFmt = moneyFormat;
+      });
+      styleDataRow(sheetRow);
+    });
+    cashiersSheet.columns = [
+      { width: 7 },
+      { width: 26 },
+      { width: 15 },
+      { width: 17 },
+      { width: 15 },
+      { width: 15 },
+      { width: 15 },
+      { width: 15 },
+    ];
+
+    [reportSheet, summarySheet, productsSheet, ordersSheet, cashiersSheet].forEach(styleSheet);
+
+    const fileFrom = formatDateOnly(range.from);
+    const fileTo = formatDateOnly(range.to);
+    const fileName = `${sanitizeFilePart(shopName)}_${fileFrom}_${fileTo}_hisobot.xlsx`;
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+
+    await workbook.xlsx.write(res);
+    return res.end();
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
+    if (error.message.includes("Invalid") || error.message.includes("cannot")) {
+      return res.status(400).json({ message: error.message });
+    }
     return res.status(500).json({ message: error.message });
   }
 };
@@ -1100,35 +1934,133 @@ exports.getSaleProductByBarcode = async (req, res) => {
       return res.status(400).json({ message: "barcode is required" });
     }
 
-    const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId);
-    const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+    let warehouseId;
+    let shopWarehouse;
+    let barcodeCacheKey;
 
-    const product = await Product.findOne({ barcode: normalizedBarcode })
-      .populate("categoryId", "name")
+    if (req.user?.role === "cashier") {
+      const shopId = req.user.shopId?._id || req.user.shopId;
+      if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) {
+        return res.status(400).json({ message: "Cashier has no assigned shop" });
+      }
+
+      barcodeCacheKey = `cashier:${String(shopId)}:${normalizedBarcode}`;
+      const cachedLookup = getCachedValue(barcodeLookupCache, barcodeCacheKey);
+      if (cachedLookup) {
+        return res.status(cachedLookup.statusCode).json(cachedLookup.body);
+      }
+
+      const cachedShopWarehouse = shopWarehouseCache.get(String(shopId));
+      if (cachedShopWarehouse && cachedShopWarehouse.expiresAt > Date.now()) {
+        warehouseId = String(cachedShopWarehouse.shopWarehouse._id);
+        shopWarehouse = cachedShopWarehouse.shopWarehouse;
+      } else {
+        const shop = await Shop.findOne({ _id: shopId, isActive: true })
+          .select("_id warehouseId")
+          .lean();
+        if (!shop) {
+          return res.status(400).json({ message: "Assigned shop not found or inactive" });
+        }
+
+        shopWarehouse = await Warehouse.findById(shop.warehouseId)
+          .select("_id name")
+          .lean();
+        if (!shopWarehouse) {
+          return res.status(400).json({ message: "Warehouse not found" });
+        }
+
+        shopWarehouseCache.set(String(shopId), {
+          shop,
+          shopWarehouse,
+          expiresAt: Date.now() + SHOP_WAREHOUSE_CACHE_TTL_MS,
+        });
+        warehouseId = String(shopWarehouse._id);
+      }
+    } else {
+      warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId);
+      const ensuredWarehouse = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+      shopWarehouse = ensuredWarehouse.warehouse;
+      barcodeCacheKey = `${String(shopWarehouse._id)}:${normalizedBarcode}`;
+      const cachedLookup = getCachedValue(barcodeLookupCache, barcodeCacheKey);
+      if (cachedLookup) {
+        return res.status(cachedLookup.statusCode).json(cachedLookup.body);
+      }
+    }
+
+
+    const product = await Product.findOne({ barcode: normalizedBarcode, isActive: true })
+      .select(
+        "name model barcode baseUnit categoryId hasPackage packageQuantity sellPrice miniSellPrice wholesalePrice blockSellPrice",
+      )
       .lean();
 
     if (!product) {
-      return res.status(404).json({ message: "Product not found by barcode" });
+      const notFoundResponse = { message: "Product not found by barcode" };
+      setCachedValue(
+        barcodeLookupCache,
+        barcodeCacheKey,
+        { statusCode: 404, body: notFoundResponse },
+        BARCODE_LOOKUP_CACHE_TTL_MS,
+      );
+      return res.status(404).json(notFoundResponse);
     }
 
-    const stock = await Stock.findOne({
-      productId: product._id,
-      warehouseId,
-    }).lean();
+    const [stock, category] = await Promise.all([
+      Stock.findOne({
+        productId: product._id,
+        warehouseId,
+      })
+        .select("quantity sellPrice wholesalePrice miniSellPrice")
+        .lean(),
+      product.categoryId
+        ? Category.findById(product.categoryId).select("name").lean()
+        : Promise.resolve(null),
+    ]);
 
     if (!stock) {
-      return res.status(404).json({ message: "Product not found in shop warehouse" });
+      const stockNotFoundResponse = { message: "Product not found in shop warehouse" };
+      setCachedValue(
+        barcodeLookupCache,
+        barcodeCacheKey,
+        { statusCode: 404, body: stockNotFoundResponse },
+        BARCODE_LOOKUP_CACHE_TTL_MS,
+      );
+      return res.status(404).json(stockNotFoundResponse);
     }
 
-    return res.json({
-      product,
+    const response = {
+      product: {
+        ...product,
+        categoryId: category ? { _id: category._id, name: category.name } : null,
+        sellPrice:
+          stock.sellPrice !== undefined && stock.sellPrice !== null
+            ? Number(stock.sellPrice)
+            : Number(product.sellPrice || 0),
+        wholesalePrice:
+          stock.wholesalePrice !== undefined && stock.wholesalePrice !== null
+            ? Number(stock.wholesalePrice)
+            : Number(product.wholesalePrice || 0),
+        miniSellPrice:
+          stock.miniSellPrice !== undefined && stock.miniSellPrice !== null
+            ? Number(stock.miniSellPrice)
+            : Number(product.miniSellPrice || 0),
+      },
       warehouse: {
         _id: shopWarehouse._id,
         name: shopWarehouse.name,
       },
       stockQuantity: Number(stock.quantity || 0),
       canSell: Number(stock.quantity || 0) > 0,
-    });
+    };
+
+    setCachedValue(
+      barcodeLookupCache,
+      barcodeCacheKey,
+      { statusCode: 200, body: response },
+      BARCODE_LOOKUP_CACHE_TTL_MS,
+    );
+
+    return res.json(response);
   } catch (error) {
     if (
       error.message.includes("Invalid") ||
@@ -1164,45 +2096,74 @@ exports.searchSaleProducts = async (req, res) => {
 
     const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId);
     const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(warehouseId);
+    const searchCacheKey = `${String(shopWarehouse._id)}:${queryText.toLowerCase()}:${normalizedLimit}`;
+    const cachedSearch = getCachedValue(saleSearchCache, searchCacheKey);
+    if (cachedSearch) {
+      return res.json(cachedSearch);
+    }
 
     const searchRegex = new RegExp(escapeRegex(queryText), "i");
 
+    const matchedProducts = await Product.find({
+      isActive: true,
+      $or: [{ name: searchRegex }, { model: searchRegex }],
+    })
+      .select(
+        "name model barcode baseUnit hasPackage packageQuantity sellPrice miniSellPrice wholesalePrice blockSellPrice categoryId",
+      )
+      .populate({
+        path: "categoryId",
+        select: "name",
+      })
+      .limit(normalizedLimit * 3)
+      .lean();
+
+    if (matchedProducts.length === 0) {
+      const emptyResponse = {
+        warehouse: {
+          _id: shopWarehouse._id,
+          name: shopWarehouse.name,
+        },
+        total: 0,
+        items: [],
+      };
+      setCachedValue(saleSearchCache, searchCacheKey, emptyResponse, SALE_SEARCH_CACHE_TTL_MS);
+      return res.json(emptyResponse);
+    }
+
+    const matchedProductIds = matchedProducts.map((product) => product._id);
     const stocks = await Stock.find({
       warehouseId,
       quantity: { $gt: 0 },
+      productId: { $in: matchedProductIds },
     })
-      .populate({
-        path: "productId",
-        select:
-          "name model barcode baseUnit hasPackage packageQuantity sellPrice miniSellPrice wholesalePrice blockSellPrice isActive categoryId",
-        match: {
-          isActive: true,
-          $or: [{ name: searchRegex }, { model: searchRegex }],
-        },
-        populate: {
-          path: "categoryId",
-          select: "name",
-        },
-      })
+      .select("productId quantity")
       .lean();
 
-    const items = stocks
-      .filter((s) => s.productId)
-      .slice(0, normalizedLimit)
-      .map((s) => ({
-        product: s.productId,
-        stockQuantity: Number(s.quantity || 0),
-        canSell: Number(s.quantity || 0) > 0,
-      }));
+    const productMap = new Map(matchedProducts.map((product) => [String(product._id), product]));
 
-    return res.json({
+    const items = stocks
+      .map((stock) => ({
+        product: productMap.get(String(stock.productId)),
+        stockQuantity: Number(stock.quantity || 0),
+        canSell: Number(stock.quantity || 0) > 0,
+      }))
+      .filter((row) => row.product)
+      .slice(0, normalizedLimit)
+      .sort((a, b) => String(a.product?.name || "").localeCompare(String(b.product?.name || "")));
+
+    const response = {
       warehouse: {
         _id: shopWarehouse._id,
         name: shopWarehouse.name,
       },
       total: items.length,
       items,
-    });
+    };
+
+    setCachedValue(saleSearchCache, searchCacheKey, response, SALE_SEARCH_CACHE_TTL_MS);
+
+    return res.json(response);
   } catch (error) {
     if (
       error.message.includes("Invalid") ||
@@ -1237,6 +2198,12 @@ exports.getTopSaleProductsStats = async (req, res) => {
     const { warehouse: shopWarehouse } = await ensureWarehouseIsActiveShopWarehouse(
       await resolveWarehouseForSale(req.user, null),
     );
+
+    const statsCacheKey = `${String(shopWarehouse._id)}:${normalizedDays}:${normalizedLimit}`;
+    const cachedStats = getCachedValue(topProductsStatsCache, statsCacheKey);
+    if (cachedStats) {
+      return res.json(cachedStats);
+    }
 
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() - normalizedDays);
@@ -1297,12 +2264,16 @@ exports.getTopSaleProductsStats = async (req, res) => {
       })
       .filter(Boolean);
 
-    return res.json({
+    const response = {
       warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
       periodDays: normalizedDays,
       total: items.length,
       items,
-    });
+    };
+
+    setCachedValue(topProductsStatsCache, statsCacheKey, response, TOP_PRODUCTS_CACHE_TTL_MS);
+
+    return res.json(response);
   } catch (error) {
     if (
       error.message.includes("Invalid") ||
@@ -1332,36 +2303,73 @@ exports.getTopProductsAvailable = async (req, res) => {
 
     const search = String(q || "").trim();
     const searchRegex = search ? new RegExp(escapeRegex(search), "i") : null;
+    const availableCacheKey = `${String(shopWarehouse._id)}:${search.toLowerCase()}:${normalizedLimit}`;
+    const cachedAvailable = getCachedValue(topProductsAvailableCache, availableCacheKey);
+    if (cachedAvailable) {
+      return res.json(cachedAvailable);
+    }
+    const productQuery = { isActive: true };
+    if (searchRegex) {
+      productQuery.$or = [{ name: searchRegex }, { model: searchRegex }, { barcode: searchRegex }];
+    }
 
-    const stocks = await Stock.find({ warehouseId: shopWarehouse._id })
-      .populate({
-        path: "productId",
-        select:
-          "name model barcode baseUnit sellPrice miniSellPrice wholesalePrice blockSellPrice hasPackage packageQuantity isActive",
-        match: searchRegex
-          ? {
-              isActive: true,
-              $or: [{ name: searchRegex }, { model: searchRegex }, { barcode: searchRegex }],
-            }
-          : { isActive: true },
-      })
+    const matchedProducts = await Product.find(productQuery)
+      .select(
+        "name model barcode baseUnit sellPrice miniSellPrice wholesalePrice blockSellPrice hasPackage packageQuantity",
+      )
+      .sort({ updatedAt: -1 })
+      .limit(normalizedLimit * 3)
+      .lean();
+
+    if (matchedProducts.length === 0) {
+      const emptyResponse = {
+        warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+        total: 0,
+        items: [],
+      };
+      setCachedValue(
+        topProductsAvailableCache,
+        availableCacheKey,
+        emptyResponse,
+        TOP_PRODUCTS_AVAILABLE_CACHE_TTL_MS,
+      );
+      return res.json(emptyResponse);
+    }
+
+    const matchedProductIds = matchedProducts.map((product) => product._id);
+    const stocks = await Stock.find({
+      warehouseId: shopWarehouse._id,
+      productId: { $in: matchedProductIds },
+    })
+      .select("productId quantity updatedAt")
       .sort({ updatedAt: -1 })
       .lean();
 
-    const items = stocks
-      .filter((s) => s.productId)
-      .slice(0, normalizedLimit)
-      .map((s) => ({
-        product: s.productId,
-        stockQuantity: Number(s.quantity || 0),
-        canSell: Number(s.quantity || 0) > 0,
-      }));
+    const productMap = new Map(matchedProducts.map((product) => [String(product._id), product]));
 
-    return res.json({
+    const items = stocks
+      .map((stock) => ({
+        product: productMap.get(String(stock.productId)),
+        stockQuantity: Number(stock.quantity || 0),
+        canSell: Number(stock.quantity || 0) > 0,
+      }))
+      .filter((row) => row.product)
+      .slice(0, normalizedLimit);
+
+    const response = {
       warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
       total: items.length,
       items,
-    });
+    };
+
+    setCachedValue(
+      topProductsAvailableCache,
+      availableCacheKey,
+      response,
+      TOP_PRODUCTS_AVAILABLE_CACHE_TTL_MS,
+    );
+
+    return res.json(response);
   } catch (error) {
     if (
       error.message.includes("Invalid") ||
@@ -1419,18 +2427,9 @@ exports.setQuickSaleProducts = async (req, res) => {
         throw new Error("Some productIds are invalid or inactive");
       }
 
-      if (deduped.length > 0) {
-        const existingStocks = await Stock.find({
-          warehouseId,
-          productId: { $in: deduped },
-        })
-          .select("productId")
-          .session(session)
-          .lean();
-        if (existingStocks.length !== deduped.length) {
-          throw new Error("Some productIds are not found in this warehouse stock");
-        }
-      }
+      // Quick ro'yxat mahsulot tanlovini saqlaydi, ombordagi qoldiqni emas.
+      // Stock hujjati hali yaratilmagan mahsulot ham ro'yxatda turishi mumkin;
+      // GET endpoint bunday mahsulotni stockQuantity=0, canSell=false qaytaradi.
 
       await ShopQuickProduct.deleteMany({ shopId }).session(session);
 
@@ -1868,5 +2867,158 @@ exports.deleteSale = async (req, res) => {
     }
 
     res.status(500).json({ message: error.message });
+  }
+};
+
+// ───────────────────────── FISKAL (Soliq/OFD — E-POS) ─────────────────────────
+//
+// Flow: Flutter savdoni yaratadi -> bu endpointdan tayyor E-POS payload oladi ->
+// payloadga lokal E-POS token qo'shadi -> kassa kompyuterining lokal E-POSiga
+// (http://127.0.0.1:3448/uzpos) yuboradi -> javobni POST /sales/:id/fiscal orqali
+// shu yerga saqlaydi. Backend tokenni qaytarmaydi.
+
+const toTiyin = (som) => Math.round(Number(som || 0) * 100);
+
+// Sotuvga tegishli warehouse kassirning do'koniga mosligini tekshiradi.
+const assertSaleAccess = async (user, sale) => {
+  if (user?.role !== "cashier") return;
+  const allowedWarehouseId = await resolveWarehouseForSale(user, null);
+  if (String(sale.warehouseId?._id || sale.warehouseId) !== String(allowedWarehouseId)) {
+    const err = new Error("Sale does not belong to your shop warehouse");
+    err.statusCode = 403;
+    throw err;
+  }
+};
+
+// GET /sales/:id/fiscal/payload — tayyor E-POS payloadni qaytaradi (tokensiz).
+exports.getFiscalPayload = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid sale ID" });
+    }
+
+    const sale = await Sale.findById(id).populate("createdBy", "fullName").lean();
+
+    if (!sale) {
+      return res.status(404).json({ message: "Sale not found" });
+    }
+
+    await assertSaleAccess(req.user, sale);
+
+    const setting = await loadGlobalSetting();
+    const fiscal = setting.fiscal || {};
+
+    const staffName =
+      (fiscal.staffName && String(fiscal.staffName).trim()) ||
+      sale.createdBy?.fullName ||
+      "Kassir";
+    const printerSize = Number(fiscal.printerSize) > 0 ? Number(fiscal.printerSize) : 58;
+
+    const fiscalProducts = await FiscalProduct.find({ isActive: true })
+      .select("name barcode sellPrice fiscalClassCode fiscalPackageCode fiscalVatPercent isActive")
+      .lean();
+
+    const items = composeFiscalItemsFromCatalog(sale.totalAmount, fiscalProducts);
+
+    const receivedCash = toTiyin(sale.cashAmount || 0);
+    const receivedCard = toTiyin(
+      Number(sale.cardAmount || 0) + Number(sale.clickAmount || 0),
+    );
+
+    return res.json({
+      method: "sale",
+      saleId: String(sale._id),
+      fiscalEnabled: Boolean(fiscal.enabled),
+      alreadyFiscalized: sale.fiscal?.status === "success",
+      payload: {
+        companyName: fiscal.companyName || "",
+        companyAddress: fiscal.companyAddress || "",
+        companyINN: fiscal.companyINN || "",
+        staffName,
+        printerSize,
+        companyPhoneNumber: fiscal.companyPhoneNumber || "",
+        params: {
+          items,
+          receivedCash,
+          receivedCard,
+        },
+      },
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
+    if (
+      error.message.includes("Invalid") ||
+      error.message.includes("Assign shopId") ||
+      error.message.includes("allowed") ||
+      error.message.includes("not found")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// POST /sales/:id/fiscal — E-POSdan kelgan fiskal natijani saqlaydi.
+exports.saveFiscalResult = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid sale ID" });
+    }
+
+    const {
+      status,
+      method,
+      terminalId,
+      receiptSeq,
+      dateTime,
+      fiscalSign,
+      qrCodeUrl,
+      paycheck,
+      errorMessage,
+      rawResponse,
+    } = req.body || {};
+
+    const normalizedStatus = String(status || "").trim().toLowerCase();
+    if (!["success", "failed"].includes(normalizedStatus)) {
+      return res.status(400).json({ message: "status must be 'success' or 'failed'" });
+    }
+
+    const sale = await Sale.findById(id);
+    if (!sale) {
+      return res.status(404).json({ message: "Sale not found" });
+    }
+
+    await assertSaleAccess(req.user, sale);
+
+    sale.fiscal = {
+      status: normalizedStatus,
+      method: method || "sale",
+      terminalId: terminalId ? String(terminalId) : "",
+      receiptSeq: receiptSeq != null ? String(receiptSeq) : "",
+      dateTime: dateTime ? String(dateTime) : "",
+      fiscalSign: fiscalSign ? String(fiscalSign) : "",
+      qrCodeUrl: qrCodeUrl ? String(qrCodeUrl) : "",
+      paycheck: paycheck ?? null,
+      errorMessage: normalizedStatus === "failed" ? String(errorMessage || "E-POS xatosi") : "",
+      rawResponse: rawResponse ?? null,
+      submittedAt: new Date(),
+    };
+
+    await sale.save();
+
+    return res.json({
+      message:
+        normalizedStatus === "success" ? "Fiskal natija saqlandi" : "Fiskal xatolik saqlandi",
+      fiscal: sale.fiscal,
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
+    return res.status(500).json({ message: error.message });
   }
 };

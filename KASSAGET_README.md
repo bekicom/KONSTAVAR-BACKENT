@@ -51,6 +51,28 @@ Content-Type: application/json
 /api/sales/history?date=2026-04-30&limit=20&topLimit=10
 ```
 
+## 1.1 Excel hisobot
+
+`GET /api/sales/history/excel`
+
+Faqat `admin` ishlatadi. Kunlik yoki period/oylik sotuv hisobotini `.xlsx`
+formatda qaytaradi. Fayl quyidagi sheetlar bilan SORA shabloniga yaqin
+ko'rinishda chiqadi: `Hisobot`, `Xulosa`, `Mahsulotlar`, `Buyurtmalar`,
+`Kassirlar`.
+
+Query parametrlari `sales/history` bilan bir xil:
+
+- `date=YYYY-MM-DD` - bitta kunlik hisobot
+- `from=YYYY-MM-DD&to=YYYY-MM-DD` - period yoki oylik hisobot
+- `warehouseId`, `shopId`, `cashierId` - ixtiyoriy filtrlar
+
+Misollar:
+
+```http
+/api/sales/history/excel?date=2026-07-02
+/api/sales/history/excel?from=2026-07-01&to=2026-07-31
+```
+
 ### Response
 
 ```json

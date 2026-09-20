@@ -4,6 +4,19 @@ const Stock = require("../models/Stock");
 const Product = require("../models/Product");
 const Shop = require("../models/Shop");
 const ShopTransfer = require("../models/ShopTransfer");
+const ShopQuickProduct = require("../models/ShopQuickProduct");
+const Sale = require("../models/Sale");
+const SaleReturn = require("../models/SaleReturn");
+const Purchase = require("../models/Purchase");
+const SupplierReturn = require("../models/SupplierReturn");
+const ClientPayment = require("../models/ClientPayment");
+const InventorySession = require("../models/InventorySession");
+const Writeoff = require("../models/Writeoff");
+const StockAdjustment = require("../models/StockAdjustment");
+const Shift = require("../models/Shift");
+const Expense = require("../models/Expense");
+const User = require("../models/User");
+const { verifyDeletionCodeFromRequest } = require("../utils/deletionCodeGuard");
 
 exports.createShop = async (req, res) => {
   try {
@@ -152,25 +165,45 @@ exports.deleteShop = async (req, res) => {
       return res.status(400).json({ message: "Invalid shop ID" });
     }
 
+    const codeCheck = await verifyDeletionCodeFromRequest(req);
+    if (!codeCheck.ok) {
+      return res
+        .status(codeCheck.status)
+        .json({ message: codeCheck.message, code: codeCheck.reason });
+    }
+
     {
       const shop = await Shop.findById(id).session(session);
       if (!shop) {
         throw new Error("Shop not found");
       }
+      const warehouseId = shop.warehouseId;
+      const saleDocs = await Sale.find({ warehouseId }).select("clientId").lean();
+      const saleIds = saleDocs.map((row) => row._id);
+      const shiftDocs = await Shift.find({ $or: [{ shopId: shop._id }, { warehouseId }] }).select("_id").lean();
+      const shiftIds = shiftDocs.map((row) => row._id);
 
-      const positiveStockCount = await Stock.countDocuments({
-        warehouseId: shop.warehouseId,
-        quantity: { $gt: 0 },
-      }).session(session);
-
-      if (positiveStockCount > 0) {
-        throw new Error("Cannot delete shop. Shop warehouse still has stock");
+      await ShopTransfer.deleteMany({ $or: [{ shopId: shop._id }, { destinationWarehouseId: warehouseId }] }).session(session);
+      await ShopQuickProduct.deleteMany({ shopId: shop._id }).session(session);
+      await SaleReturn.deleteMany({ warehouseId }).session(session);
+      if (saleIds.length > 0) {
+        await SaleReturn.deleteMany({ saleId: { $in: saleIds } }).session(session);
       }
-
-      await ShopTransfer.deleteMany({ shopId: shop._id }).session(session);
+      await Sale.deleteMany({ warehouseId }).session(session);
+      await SupplierReturn.deleteMany({ warehouseId }).session(session);
+      await ClientPayment.deleteMany({ warehouseId }).session(session);
+      await InventorySession.deleteMany({ warehouseId }).session(session);
+      await Writeoff.deleteMany({ warehouseId }).session(session);
+      await StockAdjustment.deleteMany({ warehouseId }).session(session);
+      if (shiftIds.length > 0) {
+        await Expense.deleteMany({ shiftId: { $in: shiftIds } }).session(session);
+      }
+      await Shift.deleteMany({ $or: [{ shopId: shop._id }, { warehouseId }] }).session(session);
+      await Purchase.deleteMany({ warehouseId }).session(session);
+      await Stock.deleteMany({ warehouseId }).session(session);
+      await User.updateMany({ shopId: shop._id }, { $set: { shopId: null } }).session(session);
       await Shop.deleteOne({ _id: shop._id }).session(session);
-      await Warehouse.deleteOne({ _id: shop.warehouseId }).session(session);
-      await Stock.deleteMany({ warehouseId: shop.warehouseId }).session(session);
+      await Warehouse.deleteOne({ _id: warehouseId }).session(session);
     }
 
     return res.json({ message: "Shop deleted successfully" });

@@ -3,6 +3,10 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Shop = require("../models/Shop");
 const { getOpenCashierShift } = require("../utils/shiftHelper");
+const {
+  normalizeObjectIdList,
+  normalizeAllowedMenuKeys,
+} = require("../utils/userAccess");
 
 // 🔹 ADMIN CREATE (faqat 1 marta)
 exports.createAdmin = async (req, res) => {
@@ -42,7 +46,9 @@ exports.login = async (req, res) => {
   try {
     const { phone, password } = req.body;
 
-    const user = await User.findOne({ phone }).populate("shopId", "name warehouseId isActive");
+    const user = await User.findOne({ phone })
+      .populate("shopId", "name warehouseId isActive")
+      .populate("warehouseIds", "name address isActive");
     if (!user) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
@@ -73,9 +79,12 @@ exports.login = async (req, res) => {
       user: {
         id: user._id,
         fullName: user.fullName,
+        phone: user.phone,
         role: user.role,
         shopId: user.shopId?._id || null,
         shopWarehouseId: user.shopId?.warehouseId || null,
+        warehouseIds: (user.warehouseIds || []).map((item) => item?._id || item),
+        allowedMenuKeys: Array.isArray(user.allowedMenuKeys) ? user.allowedMenuKeys : [],
       },
       activeShift: activeShift
         ? {
@@ -95,13 +104,14 @@ exports.login = async (req, res) => {
 // 🔹 USER CREATE (Admin warehouse/cashier yaratadi)
 exports.createUser = async (req, res) => {
   try {
-    const { fullName, phone, password, role, shopId } = req.body;
+    const { fullName, phone, password, role, shopId, warehouseIds, allowedMenuKeys } = req.body;
 
     if (!["warehouse", "cashier"].includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
     }
 
     let resolvedShopId = null;
+    let resolvedWarehouseIds = [];
     if (role === "cashier") {
       if (!shopId) {
         return res.status(400).json({ message: "shopId is required for cashier" });
@@ -112,6 +122,11 @@ exports.createUser = async (req, res) => {
         return res.status(400).json({ message: "Invalid or inactive shopId for cashier" });
       }
       resolvedShopId = shop._id;
+    } else if (role === "warehouse") {
+      resolvedWarehouseIds = normalizeObjectIdList(warehouseIds);
+      if (resolvedWarehouseIds.length === 0) {
+        return res.status(400).json({ message: "warehouseIds is required for warehouse user" });
+      }
     }
 
     const existing = await User.findOne({ phone });
@@ -127,10 +142,14 @@ exports.createUser = async (req, res) => {
       password: hashedPassword,
       role,
       shopId: resolvedShopId,
+      warehouseIds: resolvedWarehouseIds,
+      allowedMenuKeys: normalizeAllowedMenuKeys(role, allowedMenuKeys),
     });
 
-    // 🔥 Passwordni chiqarib tashlaymiz
-    const { password: _, ...safeUser } = user.toObject();
+    const safeUser = await User.findById(user._id, { password: 0 })
+      .populate("shopId", "name warehouseId isActive")
+      .populate("warehouseIds", "name address isActive")
+      .lean();
 
     res.status(201).json({
       message: "User created successfully",
