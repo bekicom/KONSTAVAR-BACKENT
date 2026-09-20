@@ -121,10 +121,19 @@ const validateAndResolvePayment = (paymentType, cashAmount, cardAmount, clickAmo
   };
 };
 
-const ensureWarehouseIsActiveShopWarehouse = async (warehouseId, session = null) => {
-  let shopQuery = Shop.findOne({ warehouseId, isActive: true });
-  if (session) shopQuery = shopQuery.session(session);
-  const shop = await shopQuery;
+const ensureWarehouseIsActiveShopWarehouse = async (warehouseId, session = null, knownShop = null) => {
+  // Chaqiruvchi do'konni allaqachon o'qigan bo'lsa (kassir yo'li), uni qayta so'ramaymiz.
+  const knownShopMatches =
+    knownShop &&
+    knownShop.isActive !== false &&
+    String(knownShop.warehouseId || "") === String(warehouseId || "");
+
+  let shop = knownShopMatches ? knownShop : null;
+  if (!shop) {
+    let shopQuery = Shop.findOne({ warehouseId, isActive: true });
+    if (session) shopQuery = shopQuery.session(session);
+    shop = await shopQuery;
+  }
 
   if (!shop) {
     throw new Error("Sale is allowed only from active shop warehouse");
@@ -161,7 +170,7 @@ const resolveWarehouseForSale = async (user, requestedWarehouseId, session = nul
       throw new Error("Assigned shop not found or inactive");
     }
 
-    const { warehouse } = await ensureWarehouseIsActiveShopWarehouse(shop.warehouseId, session);
+    const { warehouse } = await ensureWarehouseIsActiveShopWarehouse(shop.warehouseId, session, shop);
     return warehouse._id;
   }
 
@@ -498,8 +507,9 @@ exports.createSale = async (req, res) => {
     const saleDoc = await withTransaction(async (session) => {
       let saleDoc;
       {
+      // resolveWarehouseForSale har bir yo'lda ensureWarehouseIsActiveShopWarehouse ni
+      // chaqiradi, shuning uchun bu yerda qayta tekshirish (2 ta ortiqcha so'rov) shart emas.
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
-      await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
       const normalizedPaymentType = paymentType || "cash";
       let activeShift = null;
       if (req.user?.role === "cashier") {
@@ -557,6 +567,18 @@ exports.createSale = async (req, res) => {
       const processedItems = [];
       const requiredByProduct = new Map();
 
+      // Har bir qator uchun alohida findById o'rniga bitta $in so'rovi.
+      for (const item of items) {
+        if (!mongoose.Types.ObjectId.isValid(item?.productId)) {
+          throw new Error("Invalid productId");
+        }
+      }
+      const uniqueProductIds = [...new Set(items.map((item) => String(item.productId)))];
+      let productQuery = Product.find({ _id: { $in: uniqueProductIds } });
+      if (session) productQuery = productQuery.session(session);
+      const loadedProducts = await productQuery;
+      const productById = new Map(loadedProducts.map((doc) => [String(doc._id), doc]));
+
       for (const item of items) {
         const { productId } = item;
       const inputType = item.inputType || "unit";
@@ -573,7 +595,7 @@ exports.createSale = async (req, res) => {
           throw new Error("inputQuantity must be a positive number");
         }
 
-        const product = await Product.findById(productId).session(session);
+        const product = productById.get(String(productId));
         if (!product) {
           throw new Error("Product not found");
         }
@@ -640,6 +662,62 @@ exports.createSale = async (req, res) => {
         throw err;
       }
 
+      if (session) {
+        // Tranzaksiya ichida: avval qoldiqlarni bitta so'rov bilan o'qib tekshiramiz
+        // (xato xabari aniq chiqishi uchun), keyin bitta bulkWrite bilan kamaytiramiz.
+        // Har bir qatorda `quantity: { $gte }` sharti saqlanadi, ya'ni ikki kassa
+        // bir vaqtda sotsa ham qoldiq manfiyga tushmaydi - tranzaksiya bekor bo'ladi.
+        const productObjectIds = [...requiredByProduct.keys()].map(
+          (id) => new mongoose.Types.ObjectId(id),
+        );
+
+        const currentRows = await Stock.find({
+          productId: { $in: productObjectIds },
+          warehouseId,
+        })
+          .session(session)
+          .select("productId quantity")
+          .lean();
+        const currentByProduct = new Map(currentRows.map((row) => [String(row.productId), row]));
+
+        for (const [productId, requiredQty] of requiredByProduct.entries()) {
+          const current = currentByProduct.get(String(productId));
+          if (!current) {
+            const err = new Error("Stock not found for one of products in this warehouse");
+            err.statusCode = 409;
+            throw err;
+          }
+          if (Number(current.quantity) < requiredQty) {
+            const err = new Error(
+              `Insufficient stock for one of products (available ${Number(current.quantity)}, requested ${requiredQty})`,
+            );
+            err.statusCode = 409;
+            throw err;
+          }
+        }
+
+        const stockOps = [...requiredByProduct.entries()].map(([productId, requiredQty]) => ({
+          updateOne: {
+            filter: {
+              productId: new mongoose.Types.ObjectId(productId),
+              warehouseId,
+              quantity: { $gte: requiredQty },
+            },
+            update: { $inc: { quantity: -requiredQty } },
+          },
+        }));
+
+        const bulkResult = await Stock.bulkWrite(stockOps, { session, ordered: false });
+
+        if (bulkResult.matchedCount !== stockOps.length) {
+          // Tekshiruv bilan yozish orasida boshqa sotuv qoldiqni o'zgartirgan.
+          const err = new Error(
+            "Insufficient stock for one of products (concurrent update), please retry",
+          );
+          err.statusCode = 409;
+          throw err;
+        }
+      } else {
       const decrementedProductIds = [];
       try {
         for (const [productId, requiredQty] of requiredByProduct.entries()) {
@@ -669,6 +747,7 @@ exports.createSale = async (req, res) => {
           ).catch(() => {});
         }
         throw stockErr;
+      }
       }
 
       let payment;
