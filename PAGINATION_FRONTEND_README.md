@@ -86,6 +86,11 @@ GET /api/stocks?page=1&limit=20&sort=updatedAt:-1,_id:-1
 Qo'shimcha filter:
 
 - `warehouseId`
+- `q` (yoki `search`) - mahsulot nomi, modeli yoki barcode bo'yicha qidiruv
+
+```http
+GET /api/stocks?page=1&limit=20&q=sement
+```
 
 Sort tavsiyasi:
 
