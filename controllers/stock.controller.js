@@ -3,7 +3,7 @@ const Stock = require("../models/Stock");
 const Warehouse = require("../models/Warehouse");
 const Product = require("../models/Product");
 const { applyWarehouseScope, ensureWarehouseAccess, getAssignedWarehouseIds } = require("../utils/userAccess");
-const { parsePagination, parseSort } = require("../utils/pagination");
+const { parsePagination, parseSort, isPaginatedRequest } = require("../utils/pagination");
 
 const STOCK_LIST_CACHE_TTL_MS = 10000;
 const stockListCache = new Map();
@@ -171,11 +171,7 @@ exports.getStocks = async (req, res) => {
         .lean();
 
       if (matchedProductIds.length === 0) {
-        if (
-          req.query.page !== undefined ||
-          req.query.skip !== undefined ||
-          req.query.paginated === "true"
-        ) {
+        if (isPaginatedRequest(req.query)) {
           const { page, limit } = parsePagination(req.query);
           return res.json({
             items: [],
@@ -210,11 +206,7 @@ exports.getStocks = async (req, res) => {
       return res.json(cachedResponse);
     }
 
-    if (
-      req.query.page !== undefined ||
-      req.query.skip !== undefined ||
-      req.query.paginated === "true"
-    ) {
+    if (isPaginatedRequest(req.query)) {
       const { page, limit, skip } = parsePagination(req.query);
       const sort = parseSort(req.query.sort, { updatedAt: -1, _id: -1 });
 
@@ -470,38 +462,55 @@ exports.getWarehouseStock = async (req, res) => {
       ? stocks
       : stocks.filter((stock) => !isDormant(stock));
 
-    return res.status(200).json({
+    const rows = visibleStocks.map((stock) => {
+      const quantity = Number(stock.quantity || 0);
+      const minStockQuantity = Number(stock.productId?.minStockQuantity);
+      return {
+        ...stock,
+        isLowStock:
+          Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? quantity <= minStockQuantity : false,
+        lowStockThreshold: Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? minStockQuantity : null,
+        sellPrice:
+          stock.sellPrice !== undefined && stock.sellPrice !== null
+            ? Number(stock.sellPrice)
+            : Number(stock.productId?.sellPrice || 0),
+        wholesalePrice:
+          stock.wholesalePrice !== undefined && stock.wholesalePrice !== null
+            ? Number(stock.wholesalePrice)
+            : Number(stock.productId?.wholesalePrice || 0),
+        miniSellPrice:
+          stock.miniSellPrice !== undefined && stock.miniSellPrice !== null
+            ? Number(stock.miniSellPrice)
+            : Number(stock.productId?.miniSellPrice || 0),
+      };
+    });
+
+    const basePayload = {
       success: true,
       warehouse: {
         _id: warehouse._id,
         name: warehouse.name,
       },
-      totalProducts: visibleStocks.length,
+      totalProducts: rows.length,
       dormantHidden: stocks.length - visibleStocks.length,
       dormantDays: DORMANT_DAYS,
-      data: visibleStocks.map((stock) => {
-        const quantity = Number(stock.quantity || 0);
-        const minStockQuantity = Number(stock.productId?.minStockQuantity);
-        return {
-          ...stock,
-          isLowStock:
-            Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? quantity <= minStockQuantity : false,
-          lowStockThreshold: Number.isFinite(minStockQuantity) && minStockQuantity >= 0 ? minStockQuantity : null,
-          sellPrice:
-            stock.sellPrice !== undefined && stock.sellPrice !== null
-              ? Number(stock.sellPrice)
-              : Number(stock.productId?.sellPrice || 0),
-          wholesalePrice:
-            stock.wholesalePrice !== undefined && stock.wholesalePrice !== null
-              ? Number(stock.wholesalePrice)
-              : Number(stock.productId?.wholesalePrice || 0),
-          miniSellPrice:
-            stock.miniSellPrice !== undefined && stock.miniSellPrice !== null
-              ? Number(stock.miniSellPrice)
-              : Number(stock.productId?.miniSellPrice || 0),
-        };
-      }),
-    });
+    };
+
+    if (isPaginatedRequest(req.query)) {
+      const { page, limit, skip } = parsePagination(req.query);
+      const data = rows.slice(skip, skip + limit);
+      return res.status(200).json({
+        ...basePayload,
+        total: rows.length,
+        page,
+        limit,
+        pages: limit > 0 ? Math.ceil(rows.length / limit) : 0,
+        hasMore: skip + data.length < rows.length,
+        data,
+      });
+    }
+
+    return res.status(200).json({ ...basePayload, data: rows });
   } catch (error) {
     console.error("Get warehouse stock error:", error);
     return res.status(500).json({

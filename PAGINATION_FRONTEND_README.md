@@ -1,11 +1,13 @@
 # Frontend Pagination README
 
-Quyidagi 2 ta endpoint frontend uchun pagination bilan ishlaydi:
+Quyidagi endpointlar frontend uchun pagination bilan ishlaydi:
 
 - `GET /api/stocks`
 - `GET /api/purchases`
+- `GET /api/:warehouseId/stock`
+- `GET /api/sales/offline-catalog`
 
-Ikkalasida ham bir xil pagination format ishlatiladi.
+Hammasida bir xil pagination format ishlatiladi.
 
 ## Paginationni yoqish
 
@@ -95,6 +97,77 @@ GET /api/stocks?page=1&limit=20&q=sement
 Sort tavsiyasi:
 
 - default `updatedAt:-1,_id:-1`
+
+## Warehouse stock endpoint
+
+Endpoint:
+
+```http
+GET /api/:warehouseId/stock
+Authorization: Bearer TOKEN
+```
+
+Misollar:
+
+```http
+GET /api/WAREHOUSE_ID/stock?page=1&limit=20
+GET /api/WAREHOUSE_ID/stock?paginated=true&limit=20
+GET /api/WAREHOUSE_ID/stock?page=1&limit=20&includeDormant=true
+```
+
+Bu endpoint `items` emas, **`data`** ichida qaytaradi (eski format saqlangan):
+
+```json
+{
+  "success": true,
+  "warehouse": { "_id": "...", "name": "Asosiy ombor" },
+  "totalProducts": 1240,
+  "dormantHidden": 12,
+  "dormantDays": 60,
+  "total": 1240,
+  "page": 1,
+  "limit": 20,
+  "pages": 62,
+  "hasMore": true,
+  "data": []
+}
+```
+
+Paramsiz chaqirilsa eski format: `page`, `limit`, `pages`, `hasMore`, `total` maydonlari bo'lmaydi, `data` ichida hammasi keladi.
+
+## Offline catalog endpoint
+
+Endpoint:
+
+```http
+GET /api/sales/offline-catalog
+Authorization: Bearer TOKEN
+```
+
+Misollar:
+
+```http
+GET /api/sales/offline-catalog?page=1&limit=50
+GET /api/sales/offline-catalog?paginated=true&limit=50
+```
+
+```json
+{
+  "shop": { "_id": "...", "name": "Do'kon 1" },
+  "warehouse": { "_id": "...", "name": "Asosiy ombor" },
+  "total": 1240,
+  "quickProductIds": [],
+  "page": 1,
+  "limit": 50,
+  "pages": 25,
+  "hasMore": true,
+  "items": []
+}
+```
+
+Tartib o'zgarmaydi: avval "quick" mahsulotlar (`order` bo'yicha), keyin nom bo'yicha alifbo tartibida. Sahifalar ham shu tartibda bo'linadi, shuning uchun `page=1..N` ni ketma-ket yuklab to'liq katalog yig'iladi.
+
+Katalog 10 soniya kesh'da saqlanadi — bir sahifadan keyingisini so'rash bazaga qayta murojaat qilmaydi.
 
 ## Purchases endpoint
 

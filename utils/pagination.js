@@ -34,6 +34,13 @@ const parsePagination = (query) => {
   return { page, limit, skip };
 };
 
+/**
+ * Client pagination so'ragan-so'ramaganini aniqlaydi. `page`, `skip` yoki
+ * `paginated=true` bo'lmasa, endpoint eski (massiv) formatini qaytaradi.
+ */
+const isPaginatedRequest = (query = {}) =>
+  query.page !== undefined || query.skip !== undefined || query.paginated === "true";
+
 const parseSort = (rawSort, defaultSort = { createdAt: -1, _id: -1 }) => {
   if (!rawSort) return defaultSort;
   const tokens = Array.isArray(rawSort) ? rawSort : String(rawSort).split(",");
@@ -100,5 +107,6 @@ module.exports = {
   MAX_LIMIT,
   parsePagination,
   parseSort,
+  isPaginatedRequest,
   paginateQuery,
 };

@@ -14,6 +14,7 @@ const User = require("../models/User");
 const Shift = require("../models/Shift");
 const { requireOpenCashierShift, getOpenCashierShift, resolveCashierShop } = require("../utils/shiftHelper");
 const { loadGlobalSetting } = require("../utils/deletionCodeGuard");
+const { parsePagination, isPaginatedRequest } = require("../utils/pagination");
 
 const SHOP_WAREHOUSE_CACHE_TTL_MS = 15000;
 const shopWarehouseCache = new Map();
@@ -793,6 +794,34 @@ exports.createSale = async (req, res) => {
   }
 };
 
+/**
+ * Offline katalog javobini yig'adi. `page`, `skip` yoki `paginated=true`
+ * yuborilsa sahifalangan ko'rinish, aks holda eski to'liq ro'yxat qaytadi.
+ */
+const buildOfflineCatalogResponse = (catalog, shop, shopWarehouse, query = {}) => {
+  const base = {
+    shop: { _id: shop._id, name: shop.name },
+    warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
+    total: catalog.items.length,
+    quickProductIds: catalog.quickProductIds,
+  };
+
+  if (!isPaginatedRequest(query)) {
+    return { ...base, items: catalog.items };
+  }
+
+  const { page, limit, skip } = parsePagination(query);
+  const items = catalog.items.slice(skip, skip + limit);
+  return {
+    ...base,
+    page,
+    limit,
+    pages: limit > 0 ? Math.ceil(catalog.items.length / limit) : 0,
+    hasMore: skip + items.length < catalog.items.length,
+    items,
+  };
+};
+
 exports.getOfflineSaleCatalog = async (req, res) => {
   try {
     let shop = null;
@@ -841,7 +870,7 @@ exports.getOfflineSaleCatalog = async (req, res) => {
     const offlineCacheKey = `${String(shop._id)}:${String(shopWarehouse._id)}`;
     const cachedCatalog = getCachedValue(offlineCatalogCache, offlineCacheKey);
     if (cachedCatalog) {
-      return res.json(cachedCatalog);
+      return res.json(buildOfflineCatalogResponse(cachedCatalog, shop, shopWarehouse, req.query));
     }
 
     const [stocks, quickRows] = await Promise.all([
@@ -888,19 +917,16 @@ exports.getOfflineSaleCatalog = async (req, res) => {
         return String(a.product?.name || "").localeCompare(String(b.product?.name || ""));
       });
 
-    const response = {
-      shop: { _id: shop._id, name: shop.name },
-      warehouse: { _id: shopWarehouse._id, name: shopWarehouse.name },
-      total: items.length,
+    const catalog = {
+      items,
       quickProductIds: quickRows
         .filter((row) => row.productId)
         .map((row) => String(row.productId)),
-      items,
     };
 
-    setCachedValue(offlineCatalogCache, offlineCacheKey, response, OFFLINE_CATALOG_CACHE_TTL_MS);
+    setCachedValue(offlineCatalogCache, offlineCacheKey, catalog, OFFLINE_CATALOG_CACHE_TTL_MS);
 
-    return res.json(response);
+    return res.json(buildOfflineCatalogResponse(catalog, shop, shopWarehouse, req.query));
   } catch (error) {
     if (
       error.message.includes("Invalid") ||

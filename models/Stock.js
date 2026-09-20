@@ -47,5 +47,7 @@ const stockSchema = new mongoose.Schema(
 stockSchema.index({ productId: 1, warehouseId: 1 }, { unique: true });
 stockSchema.index({ warehouseId: 1, createdAt: -1 });
 stockSchema.index({ warehouseId: 1, updatedAt: -1 });
+// Ombor filtri berilmagan ro'yxat ham shu tartibda chiqadi (COLLSCAN bo'lmasligi uchun)
+stockSchema.index({ updatedAt: -1, _id: -1 });
 
 module.exports = mongoose.model("Stock", stockSchema);
