@@ -98,6 +98,55 @@ Sort tavsiyasi:
 
 - default `updatedAt:-1,_id:-1`
 
+## Stocks qidiruv endpointi (paginationsiz)
+
+Barcode yoki nom bo'yicha tez qidirish uchun alohida endpoint. **Pagination yo'q** -
+to'g'ridan-to'g'ri massiv qaytaradi, elementlar `GET /api/stocks` bilan bir xil formatda.
+
+```http
+GET /api/stocks/search
+Authorization: Bearer TOKEN
+```
+
+Misollar:
+
+```http
+GET /api/stocks/search?barcode=4780000000001
+GET /api/stocks/search?name=sement
+GET /api/stocks/search?q=sement
+GET /api/stocks/search?q=sement&warehouseId=WAREHOUSE_ID
+GET /api/stocks/search?q=sement&limit=100
+```
+
+Parametrlar:
+
+- `barcode` - aniq barcode (to'liq moslik)
+- `name` - nom bo'yicha qismiy qidiruv (katta-kichik harf farqsiz)
+- `q` (yoki `search`) - nom, model **yoki** barcode bo'yicha qismiy qidiruv
+- `warehouseId` - ombor bo'yicha toraytirish
+- `limit` - natija soni, default `50`, maksimum `200`
+
+`barcode`, `name`, `q` dan kamida bittasi bo'lishi shart - aks holda `400` qaytadi
+(butun bazani tortib olmaslik uchun). Bir nechtasi birga berilsa, ular **VA** shartida
+birlashtiriladi.
+
+Javob:
+
+```json
+[
+  {
+    "_id": "...",
+    "quantity": 12,
+    "sellPrice": 2000,
+    "isLowStock": false,
+    "productId": { "name": "Sement M400", "model": "S-400", "barcode": "4780000000001" },
+    "warehouseId": { "name": "Ombor A" }
+  }
+]
+```
+
+Hech narsa topilmasa bo'sh massiv `[]` qaytadi.
+
 ## Warehouse stock endpoint
 
 Endpoint:

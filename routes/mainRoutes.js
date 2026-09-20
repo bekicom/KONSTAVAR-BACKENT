@@ -598,6 +598,14 @@ router.get(
   stockController.getStocks,
 );
 
+// Diqqat: bu "/stocks/:id" dan oldin turishi shart, aks holda "search" id deb qabul qilinadi.
+router.get(
+  "/stocks/search",
+  authMiddleware,
+  roleMiddleware("admin", "warehouse"),
+  stockController.searchStocks,
+);
+
 router.get(
   "/stocks/:id",
   authMiddleware,

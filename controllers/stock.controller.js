@@ -6,6 +6,10 @@ const { applyWarehouseScope, ensureWarehouseAccess, getAssignedWarehouseIds } = 
 const { parsePagination, parseSort, isPaginatedRequest } = require("../utils/pagination");
 
 const STOCK_LIST_CACHE_TTL_MS = 10000;
+// Qidiruv endpointi paginationsiz ishlaydi, shuning uchun natija soni cheklanadi.
+const STOCK_SEARCH_DEFAULT_LIMIT = 50;
+const STOCK_SEARCH_MAX_LIMIT = 200;
+const STOCK_SEARCH_PRODUCT_SCAN_LIMIT = 1000;
 const stockListCache = new Map();
 const STOCK_SELECT_FIELDS =
   "productId warehouseId quantity sellPrice wholesalePrice miniSellPrice updatedAt createdAt";
@@ -246,6 +250,85 @@ exports.getStocks = async (req, res) => {
     res.json(response);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /api/stocks/search
+ *
+ * Barcode va nom bo'yicha qidiruv. Paginationsiz - to'g'ridan-to'g'ri massiv
+ * qaytaradi, lekin javob og'irlashmasligi uchun natija soni cheklangan
+ * (`limit`, default 50, maksimum 200).
+ *
+ *   ?barcode=4780123456789   - aniq barcode
+ *   ?name=sement             - nom bo'yicha (qismiy, katta-kichik harf farqsiz)
+ *   ?q=sement                - nom, model yoki barcode bo'yicha
+ *   ?warehouseId=...         - ombor bo'yicha toraytirish
+ */
+exports.searchStocks = async (req, res) => {
+  try {
+    const rawQuery = String(req.query.q ?? req.query.search ?? "").trim();
+    const barcode = String(req.query.barcode ?? "").trim();
+    const name = String(req.query.name ?? "").trim();
+
+    if (!rawQuery && !barcode && !name) {
+      return res.status(400).json({
+        message: "q, barcode yoki name parametrlaridan kamida bittasi kerak",
+      });
+    }
+
+    const parsedLimit = Number(req.query.limit);
+    const limit =
+      Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(STOCK_SEARCH_MAX_LIMIT, Math.floor(parsedLimit))
+        : STOCK_SEARCH_DEFAULT_LIMIT;
+
+    const stockQuery = applyWarehouseScope(req.user, {});
+
+    if (req.query.warehouseId) {
+      if (!mongoose.Types.ObjectId.isValid(req.query.warehouseId)) {
+        return res.status(400).json({ message: "Invalid warehouseId query" });
+      }
+      stockQuery.warehouseId = new mongoose.Types.ObjectId(req.query.warehouseId);
+    }
+
+    const conditions = [];
+    if (barcode) {
+      conditions.push({ barcode });
+    }
+    if (name) {
+      conditions.push({ name: new RegExp(escapeRegex(name), "i") });
+    }
+    if (rawQuery) {
+      const searchRegex = new RegExp(escapeRegex(rawQuery), "i");
+      conditions.push({
+        $or: [{ name: searchRegex }, { model: searchRegex }, { barcode: searchRegex }],
+      });
+    }
+
+    const matchedProducts = await Product.find(
+      conditions.length === 1 ? conditions[0] : { $and: conditions },
+    )
+      .select("_id")
+      .limit(STOCK_SEARCH_PRODUCT_SCAN_LIMIT)
+      .lean();
+
+    if (matchedProducts.length === 0) {
+      return res.json([]);
+    }
+
+    stockQuery.productId = { $in: matchedProducts.map((row) => row._id) };
+
+    const stockRows = await Stock.find(stockQuery)
+      .select(STOCK_SELECT_FIELDS)
+      .sort({ updatedAt: -1, _id: -1 })
+      .limit(limit)
+      .lean();
+
+    const hydrated = await hydrateStocks(stockRows);
+    return res.json(hydrated.map(normalizeStockDoc));
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
   }
 };
 
