@@ -67,6 +67,19 @@ const shiftSchema = new mongoose.Schema(
       expensesTotal: { type: Number, default: 0 },
       netTotal: { type: Number, default: 0 },
       netAfterExpenses: { type: Number, default: 0 },
+
+      // To'lov turlari bo'yicha taqsimot. Bu maydonlar sxemada bo'lmaganda
+      // mongoose ularni jimgina tashlab yuborardi va kassir smena yopganda
+      // `expectedCashInDrawer` ilovaga yetib bormasdi.
+      cashSalesTotal: { type: Number, default: 0 },
+      cardSalesTotal: { type: Number, default: 0 },
+      clickSalesTotal: { type: Number, default: 0 },
+      paidAmountTotal: { type: Number, default: 0 },
+      dueAmountTotal: { type: Number, default: 0 },
+
+      // Smena oxirida kassada bo'lishi kerak naqd pul:
+      // ochilish naqdi + naqd sotuv - qaytarishlar - xarajatlar
+      expectedCashInDrawer: { type: Number, default: 0 },
     },
   },
   { timestamps: true },

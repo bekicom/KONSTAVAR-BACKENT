@@ -16,6 +16,7 @@ const { requireOpenCashierShift, getOpenCashierShift, resolveCashierShop } = req
 const { loadGlobalSetting } = require("../utils/deletionCodeGuard");
 const { parsePagination, isPaginatedRequest } = require("../utils/pagination");
 const { restrictWarehouseFilter, ensureWarehouseAccess } = require("../utils/userAccess");
+const { withTransaction } = require("../utils/withTransaction");
 
 const SHOP_WAREHOUSE_CACHE_TTL_MS = 15000;
 const shopWarehouseCache = new Map();
@@ -480,7 +481,6 @@ const buildSalesReportQuery = async ({ date, from, to, warehouseId, cashierId, s
 };
 
 exports.createSale = async (req, res) => {
-  const { withTransaction } = require("../utils/withTransaction");
   try {
     const {
       warehouseId: requestedWarehouseId,
@@ -2509,8 +2509,6 @@ exports.getTopProductsAvailable = async (req, res) => {
 };
 
 exports.setQuickSaleProducts = async (req, res) => {
-  const session = undefined;
-
   try {
     const { productIds } = req.body;
 
@@ -2538,7 +2536,9 @@ exports.setQuickSaleProducts = async (req, res) => {
     let shopId;
     let warehouseId;
 
-    {
+    // Do'kon tezkor mahsulotlarini almashtirish bitta tranzaksiyada —
+    // o'chirish bajarilib qo'shish bajarilmasa ro'yxat bo'sh qolib ketardi.
+    await withTransaction(async (session) => {
       const resolved = await resolveShopForSale(req.user, session);
       shopId = resolved.shop._id;
       warehouseId = resolved.warehouseId;
@@ -2567,7 +2567,7 @@ exports.setQuickSaleProducts = async (req, res) => {
         }));
         await ShopQuickProduct.insertMany(docs, { session });
       }
-    }
+    });
 
     return res.json({
       message: "Quick sale products updated successfully",
@@ -2733,8 +2733,6 @@ exports.searchSaleHistoryByBarcode = async (req, res) => {
 };
 
 exports.createSaleReturn = async (req, res) => {
-  const session = undefined;
-
   try {
     const {
       saleId,
@@ -2756,7 +2754,9 @@ exports.createSaleReturn = async (req, res) => {
 
     let returnDoc;
 
-    {
+    // Qoldiqni qaytarish, sotuv qatorlarini yangilash va qaytarish
+    // hujjatini yozish bitta tranzaksiyada.
+    await withTransaction(async (session) => {
       const warehouseId = await resolveWarehouseForSale(req.user, requestedWarehouseId, session);
       await ensureWarehouseIsActiveShopWarehouse(warehouseId, session);
       const activeShift = req.user?.role === "cashier" ? await requireOpenCashierShift(req.user, session) : null;
@@ -2856,7 +2856,7 @@ exports.createSaleReturn = async (req, res) => {
       );
 
       [returnDoc] = createdReturns;
-    }
+    });
 
     const populated = await SaleReturn.findById(returnDoc._id)
       .populate("saleId", "createdAt paymentType totalAmount")
@@ -2921,15 +2921,14 @@ exports.getSaleReturnsBySaleId = async (req, res) => {
 };
 
 exports.deleteSale = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid sale ID" });
     }
 
-    {
+    // Qoldiqni tiklash va sotuvni o'chirish bitta tranzaksiyada.
+    await withTransaction(async (session) => {
       const sale = await Sale.findById(id).session(session);
       if (!sale) {
         throw new Error("Sale not found");
@@ -2980,7 +2979,7 @@ exports.deleteSale = async (req, res) => {
       }
 
       await Sale.findByIdAndDelete(id).session(session);
-    }
+    });
 
     res.json({ message: "Sale deleted successfully" });
   } catch (error) {

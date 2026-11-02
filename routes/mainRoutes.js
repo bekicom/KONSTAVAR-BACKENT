@@ -474,13 +474,19 @@ router.post(
   productController.createProduct
 );
 
+// Diqqat: bu GET'lar avval tokensiz ochiq edi — mahsulot kelgan narxi
+// (purchasePrice) va sotish narxlari internetdan ko'rinardi.
 router.get(
   "/fiscal-products",
+  authMiddleware,
+  roleMiddleware("admin", "bugalter"),
   fiscalProductController.getFiscalProducts
 );
 
 router.get(
   "/fiscal-products/:id",
+  authMiddleware,
+  roleMiddleware("admin", "bugalter"),
   fiscalProductController.getFiscalProductById
 );
 

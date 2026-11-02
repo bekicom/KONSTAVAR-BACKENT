@@ -189,15 +189,14 @@ exports.getSupplierReturnById = async (req, res) => {
 };
 
 exports.deleteSupplierReturn = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid supplier return ID" });
     }
 
-    {
+    // Qoldiqni tiklash va hujjatni o'chirish bitta tranzaksiyada.
+    await withTransaction(async (session) => {
       const supplierReturn = await SupplierReturn.findById(id).session(session);
       if (!supplierReturn) throw new Error("Supplier return not found");
       ensureWarehouseAccess(req.user, supplierReturn.warehouseId);
@@ -211,7 +210,7 @@ exports.deleteSupplierReturn = async (req, res) => {
       }
 
       await SupplierReturn.findByIdAndDelete(id).session(session);
-    }
+    });
 
     res.json({ message: "Supplier return deleted successfully" });
   } catch (error) {

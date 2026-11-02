@@ -373,6 +373,19 @@ exports.getShiftById = async (req, res) => {
         returnsTotal: round2(returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0)),
         expensesCount: expenses.length,
         expensesTotal: round2(expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0)),
+        // Smena yopilish javobi bilan bir xil bo'lishi uchun to'lov
+        // taqsimoti va kassadagi kutilgan naqd pul ham qaytariladi.
+        cashSalesTotal: round2(sales.reduce((sum, sale) => sum + Number(sale.cashAmount || 0), 0)),
+        cardSalesTotal: round2(sales.reduce((sum, sale) => sum + Number(sale.cardAmount || 0), 0)),
+        clickSalesTotal: round2(sales.reduce((sum, sale) => sum + Number(sale.clickAmount || 0), 0)),
+        paidAmountTotal: round2(sales.reduce((sum, sale) => sum + Number(sale.paidAmount || 0), 0)),
+        dueAmountTotal: round2(sales.reduce((sum, sale) => sum + Number(sale.dueAmount || 0), 0)),
+        expectedCashInDrawer: round2(
+          Number(shift.openingCash || 0) +
+            sales.reduce((sum, sale) => sum + Number(sale.cashAmount || 0), 0) -
+            returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0) -
+            expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
+        ),
         netTotal: round2(
           sales.reduce((sum, sale) => sum + Number(sale.totalAmount || 0), 0) -
             returns.reduce((sum, saleReturn) => sum + Number(saleReturn.subtotal || 0), 0),

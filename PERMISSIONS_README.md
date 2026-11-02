@@ -120,7 +120,31 @@ expenses, salaries, writeoffs, returns, transfers, fiscalProducts, settings
   yangilaydi, shuning uchun xodim qayta kirmasdan ham yangi menyu va
   do'kon cheklovini oladi (aloqa bo'lmasa saqlangani bilan davom etadi).
 
-## 5. Test
+## 5. Atomarlik (tranzaksiya)
+
+Qoldiqni o'zgartiradigan amallar bitta tranzaksiyada bajariladi, ya'ni
+o'rtada xato chiqsa hammasi bekor bo'ladi — qoldiq yarim holatda qolmaydi:
+
+`POST /sales`, `POST /purchase`, `PUT /purchases/:id`,
+`DELETE /purchases/:id`, `POST /shops/:id/transfers`, `POST /sales/returns`,
+`DELETE /sales/:id`, `POST /writeoffs`, `DELETE /writeoffs/:id`,
+`POST /supplier-returns`, `DELETE /supplier-returns/:id`,
+`POST /inventories/sessions/:id/post`, `POST /clients/:id/payments`,
+`PUT /sales/quick-products`.
+
+Qoldiq ayirishda har doim `quantity: { $gte: kerakli }` sharti qo'yiladi va
+`bulkWrite` natijasidagi `matchedCount` tekshiriladi — ikki kassa/transfer
+bir vaqtda ishlasa ham qoldiq manfiyga tushmaydi (`409` qaytadi).
+
+`utils/withTransaction.js` standalone mongod'da tranzaksiyasiz fallback
+yo'ldan ketadi, shuning uchun lokal ishlab chiqishda ham sinadi. Prod Atlas
+replica set, ya'ni tranzaksiya haqiqatan ishlaydi.
+
+> **Istisno**: `DELETE /shops/:id` tranzaksiyaga olinmagan — u o'nlab
+> kolleksiyadan kaskad o'chiradi va tarixi uzun do'kon uchun tranzaksiya
+> limitiga urilib, do'konni umuman o'chirib bo'lmay qolardi.
+
+## 6. Test
 
 ```bash
 # 1) lokal mongod + server
@@ -131,6 +155,10 @@ npm run test:e2e
 
 # 3) do'kon cheklovi va menyu ruxsatlari (e2e dan KEYIN)
 MONGO_URI=mongodb://127.0.0.1:27017/konstavar npm run test:scope
+
+# 4) atomarlik + fiskal endpoint auth (replica set kerak, e2e dan KEYIN)
+MONGO_RAW="mongodb://127.0.0.1:27019/?directConnection=true" \
+  DB_NAME=konstavar npm run test:atomic
 ```
 
 `test:scope` quyidagilarni tekshiradi: do'konga biriktirilgan admin faqat
@@ -138,3 +166,8 @@ o'z do'konini/omborini/qoldig'ini/savdosini/smenasini/xodimini ko'radi,
 begona do'kon va omborga murojaat `403`/`404` qaytaradi, tanlangan menyu
 ruxsatlari saqlanadi, `/me` yangi ruxsatni beradi, biriktirish olib
 tashlansa yana hammasi ko'rinadi, buxgalter roli ishlaydi.
+
+`test:atomic` esa: qoldiqdan oshiq transfer `409` qaytaradi va qoldiqni
+o'zgartirmaydi; ko'p qatorli transferda bitta qator yetarli bo'lmasa
+boshqalari ham ayirilmaydi; to'g'ri transfer/kirim oplogda bitta `applyOps`
+yozuvi bo'lib tushadi; `GET /fiscal-products` tokensiz `401` qaytaradi.

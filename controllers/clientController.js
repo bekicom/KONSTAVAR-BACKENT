@@ -4,6 +4,7 @@ const ClientPayment = require("../models/ClientPayment");
 const Sale = require("../models/Sale");
 const Shop = require("../models/Shop");
 const Warehouse = require("../models/Warehouse");
+const { withTransaction } = require("../utils/withTransaction");
 
 const round2 = (value) => Number(Number(value).toFixed(2));
 
@@ -167,8 +168,6 @@ exports.updateClient = async (req, res) => {
 };
 
 exports.addClientPayment = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id } = req.params;
     const { amount, paymentType, cashAmount, cardAmount, clickAmount, paymentDate, note, warehouseId } =
@@ -182,7 +181,9 @@ exports.addClientPayment = async (req, res) => {
     const split = resolvePaymentSplit(paymentType, amount, cashAmount, cardAmount, clickAmount);
 
     let paymentDoc;
-    {
+    // Mijoz to'lovini yozish va sotuvlardagi qarzni kamaytirish bitta
+    // tranzaksiyada — aks holda to'lov yozilib qarz qolib ketishi mumkin.
+    await withTransaction(async (session) => {
       const client = await Client.findById(id).session(session);
       if (!client) throw new Error("Client not found");
 
@@ -229,7 +230,7 @@ exports.addClientPayment = async (req, res) => {
         { session },
       );
       [paymentDoc] = createdPayments;
-    }
+    });
 
     const populated = await ClientPayment.findById(paymentDoc._id)
       .populate("clientId", "name phone")

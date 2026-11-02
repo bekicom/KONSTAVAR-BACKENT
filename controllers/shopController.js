@@ -17,6 +17,7 @@ const Shift = require("../models/Shift");
 const Expense = require("../models/Expense");
 const User = require("../models/User");
 const { verifyDeletionCodeFromRequest } = require("../utils/deletionCodeGuard");
+const { withTransaction } = require("../utils/withTransaction");
 const {
   applyWarehouseScope,
   applyWarehouseScopeAny,
@@ -238,8 +239,6 @@ exports.deleteShop = async (req, res) => {
 };
 
 exports.transferToShop = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id: shopId } = req.params;
     const { sourceWarehouseId, items, note } = req.body;
@@ -258,7 +257,10 @@ exports.transferToShop = async (req, res) => {
 
     let transferDoc;
 
-    {
+    // Qoldiq ayirish va qo'shish bitta tranzaksiyada bo'lishi kerak — aks
+    // holda o'rtada xato chiqsa mahsulot manba ombordan chiqib, do'konga
+    // kirmay qoladi.
+    await withTransaction(async (session) => {
       const shop = await Shop.findById(shopId).session(session);
       if (!shop) {
         throw new Error("Shop not found");
@@ -299,49 +301,81 @@ exports.transferToShop = async (req, res) => {
           throw new Error("quantity must be a positive number");
         }
 
-        const productExists = await Product.exists({ _id: productId }).session(session);
-        if (!productExists) {
-          throw new Error("Product not found in items");
-        }
-
         const key = String(productId);
         merged.set(key, Number(((merged.get(key) || 0) + quantity).toFixed(6)));
       }
 
-      for (const [productId, requiredQty] of merged.entries()) {
-        const sourceStock = await Stock.findOne({
-          productId,
-          warehouseId: sourceWarehouseId,
-        }).session(session);
+      // Har bir qator uchun alohida so'rov o'rniga bitta `$in`.
+      const productIds = [...merged.keys()].map((id) => new mongoose.Types.ObjectId(id));
+      const existingCount = await Product.countDocuments({ _id: { $in: productIds } }).session(
+        session,
+      );
+      if (existingCount !== productIds.length) {
+        throw new Error("Product not found in items");
+      }
 
-        if (!sourceStock || Number(sourceStock.quantity) < requiredQty) {
-          throw new Error("Insufficient stock in source warehouse");
+      // Avval qoldiqni o'qib tekshiramiz (xato xabari aniq chiqishi uchun).
+      const sourceRows = await Stock.find({
+        productId: { $in: productIds },
+        warehouseId: sourceWarehouseId,
+      })
+        .session(session)
+        .select("productId quantity")
+        .lean();
+      const sourceByProduct = new Map(sourceRows.map((row) => [String(row.productId), row]));
+
+      for (const [productId, requiredQty] of merged.entries()) {
+        const current = sourceByProduct.get(String(productId));
+        if (!current || Number(current.quantity) < requiredQty) {
+          const err = new Error(
+            current
+              ? `Insufficient stock in source warehouse (available ${Number(current.quantity)}, requested ${requiredQty})`
+              : "Insufficient stock in source warehouse",
+          );
+          err.statusCode = 409;
+          throw err;
         }
       }
 
-      const transferItems = [];
-      for (const [productId, requiredQty] of merged.entries()) {
-        await Stock.findOneAndUpdate(
-          { productId, warehouseId: sourceWarehouseId },
-          { $inc: { quantity: -requiredQty } },
-          { session },
-        );
+      const transferItems = [...merged.entries()].map(([productId, quantity]) => ({
+        productId,
+        quantity,
+      }));
 
-        await Stock.findOneAndUpdate(
-          { productId, warehouseId: shop.warehouseId },
-          { $inc: { quantity: requiredQty } },
-          {
-            upsert: true,
-            setDefaultsOnInsert: true,
-            session,
+      // Ayirishda `quantity: { $gte }` sharti saqlanadi — ikki transfer bir
+      // vaqtda ketsa ham qoldiq manfiyga tushmaydi, tranzaksiya bekor bo'ladi.
+      const decrementOps = transferItems.map(({ productId, quantity }) => ({
+        updateOne: {
+          filter: {
+            productId: new mongoose.Types.ObjectId(productId),
+            warehouseId: new mongoose.Types.ObjectId(String(sourceWarehouseId)),
+            quantity: { $gte: quantity },
           },
-        );
+          update: { $inc: { quantity: -quantity } },
+        },
+      }));
 
-        transferItems.push({
-          productId,
-          quantity: requiredQty,
-        });
+      const decrementResult = await Stock.bulkWrite(decrementOps, { session, ordered: false });
+      if (decrementResult.matchedCount !== decrementOps.length) {
+        const err = new Error(
+          "Insufficient stock in source warehouse (concurrent update), please retry",
+        );
+        err.statusCode = 409;
+        throw err;
       }
+
+      const incrementOps = transferItems.map(({ productId, quantity }) => ({
+        updateOne: {
+          filter: {
+            productId: new mongoose.Types.ObjectId(productId),
+            warehouseId: new mongoose.Types.ObjectId(String(shop.warehouseId)),
+          },
+          update: { $inc: { quantity } },
+          upsert: true,
+        },
+      }));
+
+      await Stock.bulkWrite(incrementOps, { session, ordered: false });
 
       const transfers = await ShopTransfer.create(
         [
@@ -358,7 +392,7 @@ exports.transferToShop = async (req, res) => {
       );
 
       [transferDoc] = transfers;
-    }
+    });
 
     const populatedTransfer = await ShopTransfer.findById(transferDoc._id)
       .populate("sourceWarehouseId", "name")

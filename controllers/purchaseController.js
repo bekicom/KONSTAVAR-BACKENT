@@ -6,6 +6,7 @@ const Warehouse = require("../models/Warehouse");
 const Supplier = require("../models/Supplier");
 const Category = require("../models/Category");
 const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
+const { withTransaction } = require("../utils/withTransaction");
 const { sendError } = require("../utils/sendError");
 
 const PURCHASE_PRODUCT_SELECT =
@@ -436,8 +437,6 @@ const processPurchaseItems = async ({ items, warehouseId, session }) => {
 };
 
 exports.createPurchase = async (req, res) => {
-  const session = undefined;
-
   try {
     const { warehouseId, items, supplierId, supplier, paymentType, paidAmount } = req.body;
 
@@ -463,7 +462,9 @@ exports.createPurchase = async (req, res) => {
 
     let purchaseDoc;
 
-    {
+    // Mahsulot narxlarini yangilash, qoldiqni oshirish va kirim hujjatini
+    // yozish bitta tranzaksiyada — o'rtada xato chiqsa hammasi bekor bo'ladi.
+    await withTransaction(async (session) => {
       const resolvedSupplier = await resolveSupplierForPurchase({ supplierId, supplier, session });
       const { processedItems, totalAmount } = await processPurchaseItems({
         items,
@@ -508,7 +509,7 @@ exports.createPurchase = async (req, res) => {
       );
 
       [purchaseDoc] = purchases;
-    }
+    });
 
     res.status(201).json({
       message: "Purchase created successfully",
@@ -687,8 +688,6 @@ exports.getPurchaseById = async (req, res) => {
 };
 
 exports.updatePurchase = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id } = req.params;
     const { supplierId, supplier, paymentType, paidAmount, items } = req.body;
@@ -716,11 +715,14 @@ exports.updatePurchase = async (req, res) => {
       purchase.paymentType = paymentType;
     }
 
-    if (items !== undefined) {
-      if (!Array.isArray(items) || items.length === 0) {
-        return res.status(400).json({ message: "Items required" });
-      }
+    if (items !== undefined && (!Array.isArray(items) || items.length === 0)) {
+      return res.status(400).json({ message: "Items required" });
+    }
 
+    // Eski qoldiqni qaytarish, yangisini qo'shish va hujjatni saqlash bitta
+    // tranzaksiyada — o'rtada xato chiqsa qoldiq yarim holatda qolmaydi.
+    await withTransaction(async (session) => {
+    if (items !== undefined) {
       for (const item of purchase.items) {
         const stock = await Stock.findOne({
           productId: item.productId,
@@ -728,9 +730,9 @@ exports.updatePurchase = async (req, res) => {
         }).session(session);
 
         if (!stock || stock.quantity < item.quantity) {
-          return res.status(400).json({
-            message: "Cannot update purchase. Some quantity already sold/moved",
-          });
+          const err = new Error("Cannot update purchase. Some quantity already sold/moved");
+          err.statusCode = 400;
+          throw err;
         }
       }
 
@@ -760,7 +762,9 @@ exports.updatePurchase = async (req, res) => {
     let normalizedPaidAmount =
       paidAmount !== undefined ? Number(paidAmount) : Number(purchase.paidAmount);
     if (!Number.isFinite(normalizedPaidAmount) || normalizedPaidAmount < 0) {
-      return res.status(400).json({ message: "paidAmount must be a non-negative number" });
+      const err = new Error("paidAmount must be a non-negative number");
+      err.statusCode = 400;
+      throw err;
     }
 
     if (purchase.paymentType === "cash") {
@@ -768,13 +772,16 @@ exports.updatePurchase = async (req, res) => {
     }
 
     if (normalizedPaidAmount > purchase.totalAmount) {
-      return res.status(400).json({ message: "paidAmount cannot be greater than totalAmount" });
+      const err = new Error("paidAmount cannot be greater than totalAmount");
+      err.statusCode = 400;
+      throw err;
     }
 
     purchase.paidAmount = Number(normalizedPaidAmount.toFixed(2));
     purchase.dueAmount = Number((purchase.totalAmount - purchase.paidAmount).toFixed(2));
 
-    await purchase.save();
+    await purchase.save({ session });
+    });
 
     const updated = await Purchase.findById(purchase._id)
       .populate("supplierId", "name phone")
@@ -816,15 +823,14 @@ exports.updatePurchase = async (req, res) => {
 };
 
 exports.deletePurchase = async (req, res) => {
-  const session = undefined;
-
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid purchase ID" });
     }
 
-    {
+    // Qoldiqni qaytarish va hujjatni o'chirish bitta tranzaksiyada.
+    await withTransaction(async (session) => {
       const purchase = await Purchase.findById(id).session(session);
       if (!purchase) {
         throw new Error("Purchase not found");
@@ -860,7 +866,7 @@ exports.deletePurchase = async (req, res) => {
       }
 
       await Purchase.findByIdAndDelete(id).session(session);
-    }
+    });
 
     res.json({ message: "Purchase deleted successfully" });
   } catch (error) {
