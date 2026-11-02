@@ -1,8 +1,29 @@
 const mongoose = require("mongoose");
 const Salary = require("../models/Salary");
 const User = require("../models/User");
+const { applyEmployeeScope, isScopedUser } = require("../utils/userAccess");
 
 const round2 = (value) => Number(Number(value || 0).toFixed(2));
+
+const SALARY_ROLES = ["admin", "warehouse", "cashier", "bugalter"];
+
+// Do'kon/omborga biriktirilgan foydalanuvchi faqat o'z xodimlarining
+// oyliklarini (va o'zi yozganlarini) ko'radi.
+const applySalaryScope = async (req, query) => {
+  if (!isScopedUser(req.user)) {
+    return query;
+  }
+
+  const employees = await User.find(applyEmployeeScope(req.user, {})).select("_id").lean();
+  const employeeIds = employees.map((employee) => employee._id);
+
+  const or = [{ createdBy: req.user._id }];
+  if (employeeIds.length > 0) {
+    or.push({ employeeId: { $in: employeeIds } });
+  }
+
+  return { ...query, $and: [...(query.$and || []), { $or: or }] };
+};
 
 const buildEmployeeQuery = (req, query, employeeId) => {
   if (req.user?.role === "cashier") {
@@ -46,13 +67,13 @@ exports.getEmployees = async (req, res) => {
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean);
-      const allowedRoles = roles.filter((item) => ["admin", "warehouse", "cashier"].includes(item));
+      const allowedRoles = roles.filter((item) => SALARY_ROLES.includes(item));
       if (allowedRoles.length === 0) {
         return res.status(400).json({ message: "Invalid role query" });
       }
       query.role = { $in: allowedRoles };
     } else {
-      query.role = { $in: ["warehouse", "cashier", "admin"] };
+      query.role = { $in: SALARY_ROLES };
     }
 
     if (isActive !== undefined) {
@@ -70,7 +91,7 @@ exports.getEmployees = async (req, res) => {
     }
     normalizedLimit = Math.min(normalizedLimit, 1000);
 
-    const employees = await User.find(query, { password: 0 })
+    const employees = await User.find(applyEmployeeScope(req.user, query), { password: 0 })
       .sort({ createdAt: -1 })
       .limit(normalizedLimit)
       .populate("shopId", "name warehouseId isActive");
@@ -198,7 +219,7 @@ exports.getSalaries = async (req, res) => {
     const { paginateQuery } = require("../utils/pagination");
     const result = await paginateQuery({
       Model: Salary,
-      filter: query,
+      filter: await applySalaryScope(req, query),
       queryParams: req.query,
       defaultSort: { salaryDate: -1, createdAt: -1, _id: -1 },
       populate: (q) =>

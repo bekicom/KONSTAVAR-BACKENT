@@ -10,7 +10,11 @@ const Writeoff = require("../models/Writeoff");
 const InventorySession = require("../models/InventorySession");
 const ShopQuickProduct = require("../models/ShopQuickProduct");
 const ShopTransfer = require("../models/ShopTransfer");
-const { ensureWarehouseAccess, getAssignedWarehouseIds } = require("../utils/userAccess");
+const {
+  ensureWarehouseAccess,
+  applyWarehouseScope,
+} = require("../utils/userAccess");
+const { sendError } = require("../utils/sendError");
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const FISCAL_CODE_REGEX = /^\d{17}$/;
@@ -115,7 +119,7 @@ exports.createProduct = async (req, res) => {
     if (error.message.includes("Category not found")) {
       return res.status(404).json({ message: error.message });
     }
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -171,7 +175,7 @@ exports.getProducts = async (req, res) => {
       hasMore: result.hasMore,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -237,7 +241,7 @@ exports.getFiscalProducts = async (req, res) => {
       hasMore: result.hasMore,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -250,7 +254,7 @@ exports.getFiscalProductById = async (req, res) => {
 
     return res.json(mapFiscalAliases(product));
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error);
   }
 };
 
@@ -385,7 +389,7 @@ exports.saveFiscalProduct = async (req, res) => {
       product: mapFiscalAliases(product),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -403,7 +407,7 @@ exports.deleteFiscalProduct = async (req, res) => {
 
     return res.json({ message: "Fiscal product deleted successfully" });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error);
   }
 };
 
@@ -424,7 +428,7 @@ exports.getProductById = async (req, res) => {
 
     res.json(mapFiscalAliases(product));
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -511,11 +515,9 @@ exports.getProductByBarcode = async (req, res) => {
       });
     }
 
-    const stockQuery = { productId: product._id };
-    const allowedWarehouseIds = getAssignedWarehouseIds(req.user);
-    if (req.user?.role === "warehouse") {
-      stockQuery.warehouseId = { $in: allowedWarehouseIds };
-    }
+    // Do'kon yoki omborga biriktirilgan foydalanuvchi faqat o'ziga ruxsat
+    // etilgan omborlardagi qoldiqni ko'radi.
+    const stockQuery = applyWarehouseScope(req.user, { productId: product._id });
 
     const stocks = await Stock.find(stockQuery)
       .populate("warehouseId", "name")
@@ -535,7 +537,7 @@ exports.getProductByBarcode = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -576,7 +578,7 @@ exports.updateProduct = async (req, res) => {
     if (error.message.includes("Category not found")) {
       return res.status(404).json({ message: error.message });
     }
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -617,6 +619,6 @@ exports.deleteProduct = async (req, res) => {
       message: "Product deleted successfully",
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };

@@ -628,6 +628,8 @@ const main = async () => {
         phone: `99897${suffix.slice(-7)}`,
         password: "Warehouse123!",
         role: "warehouse",
+        // Omborchi uchun ombor biriktirish majburiy.
+        warehouseIds: [getId("centralWarehouseId")],
       },
       expect: 201,
     });

@@ -4,6 +4,7 @@ const Warehouse = require("../models/Warehouse");
 const Product = require("../models/Product");
 const { applyWarehouseScope, ensureWarehouseAccess, getAssignedWarehouseIds } = require("../utils/userAccess");
 const { parsePagination, parseSort, isPaginatedRequest } = require("../utils/pagination");
+const { sendError } = require("../utils/sendError");
 
 const STOCK_LIST_CACHE_TTL_MS = 10000;
 // Qidiruv endpointi paginationsiz ishlaydi, shuning uchun natija soni cheklanadi.
@@ -121,7 +122,7 @@ exports.createStock = async (req, res) => {
     invalidateStockListCache();
     res.status(201).json({ message: "Stock created successfully", stock });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -163,6 +164,9 @@ exports.getStocks = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(req.query.warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
       }
+      // Query parametri cheklovni bekor qilmasligi kerak: so'ralgan omborga
+      // ruxsat borligini tekshirib, keyingina filtrga qo'yamiz.
+      ensureWarehouseAccess(req.user, req.query.warehouseId);
       stockQuery.warehouseId = new mongoose.Types.ObjectId(req.query.warehouseId);
     }
 
@@ -249,7 +253,7 @@ exports.getStocks = async (req, res) => {
     setCachedStockList(cacheKey, response);
     res.json(response);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -289,6 +293,9 @@ exports.searchStocks = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(req.query.warehouseId)) {
         return res.status(400).json({ message: "Invalid warehouseId query" });
       }
+      // Query parametri cheklovni bekor qilmasligi kerak: so'ralgan omborga
+      // ruxsat borligini tekshirib, keyingina filtrga qo'yamiz.
+      ensureWarehouseAccess(req.user, req.query.warehouseId);
       stockQuery.warehouseId = new mongoose.Types.ObjectId(req.query.warehouseId);
     }
 
@@ -328,7 +335,7 @@ exports.searchStocks = async (req, res) => {
     const hydrated = await hydrateStocks(stockRows);
     return res.json(hydrated.map(normalizeStockDoc));
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error);
   }
 };
 
@@ -374,7 +381,7 @@ exports.getStockById = async (req, res) => {
           : Number(product.miniSellPrice || 0),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -463,7 +470,7 @@ exports.updateStock = async (req, res) => {
     invalidateStockListCache();
     res.json({ message: "Stock updated successfully", stock: normalizeStockDoc(stock) });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -486,7 +493,7 @@ exports.deleteStock = async (req, res) => {
     invalidateStockListCache();
     res.json({ message: "Stock deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 

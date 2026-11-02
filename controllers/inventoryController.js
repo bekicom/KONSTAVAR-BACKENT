@@ -6,6 +6,7 @@ const Product = require("../models/Product");
 const StockAdjustment = require("../models/StockAdjustment");
 const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
 const { withTransaction } = require("../utils/withTransaction");
+const { sendError } = require("../utils/sendError");
 
 const buildSummary = (items) => {
   let countedItems = 0;
@@ -115,7 +116,7 @@ exports.createInventorySession = async (req, res) => {
       session: populated,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -148,7 +149,7 @@ exports.getInventorySessions = async (req, res) => {
 
     res.json(sessions);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -178,7 +179,7 @@ exports.getInventorySessionById = async (req, res) => {
 
     res.json(session);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -272,7 +273,7 @@ exports.updateInventoryCount = async (req, res) => {
       session: populated,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -409,7 +410,7 @@ exports.postInventorySession = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
 
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -439,6 +440,6 @@ exports.cancelInventorySession = async (req, res) => {
 
     res.json({ message: "Inventory session cancelled successfully", session });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };

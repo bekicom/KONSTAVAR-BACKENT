@@ -4,6 +4,7 @@ const Sale = require("../models/Sale");
 const SaleReturn = require("../models/SaleReturn");
 const Expense = require("../models/Expense");
 const { resolveCashierShop, getOpenCashierShift } = require("../utils/shiftHelper");
+const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
 
 const round2 = (value) => Number(Number(value || 0).toFixed(2));
 
@@ -100,6 +101,7 @@ exports.closeShift = async (req, res) => {
     }
 
     ensureCashierOwnership(req, shift);
+    ensureWarehouseAccess(req.user, shift.warehouseId);
 
     if (shift.status !== "open") {
       return res.status(400).json({ message: "Shift already closed" });
@@ -180,6 +182,9 @@ exports.closeShift = async (req, res) => {
       summary: shift.summary,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     if (
       error.message.includes("Invalid") ||
       error.message.includes("required") ||
@@ -287,7 +292,8 @@ exports.getShifts = async (req, res) => {
     const { paginateQuery } = require("../utils/pagination");
     const result = await paginateQuery({
       Model: Shift,
-      filter: query,
+      // Do'konga biriktirilgan foydalanuvchi faqat o'z do'koni smenalarini ko'radi.
+      filter: applyWarehouseScope(req.user, query, "warehouseId"),
       queryParams: req.query,
       defaultSort: { openedAt: -1, _id: -1 },
       populate: (q) =>
@@ -335,6 +341,7 @@ exports.getShiftById = async (req, res) => {
     }
 
     ensureCashierOwnership(req, shift);
+    ensureWarehouseAccess(req.user, shift.warehouseId);
 
     const [sales, returns, expenses] = await Promise.all([
       Sale.find({ shiftId: shift._id })

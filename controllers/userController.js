@@ -5,7 +5,12 @@ const Shop = require("../models/Shop");
 const {
   normalizeObjectIdList,
   normalizeAllowedMenuKeys,
+  applyEmployeeScope,
+  SHOP_ASSIGNABLE_ROLES,
 } = require("../utils/userAccess");
+const { invalidateUserCache } = require("../middleware/authMiddleware");
+
+const ASSIGNABLE_ROLES = ["admin", "warehouse", "cashier", "bugalter"];
 
 const serializeUser = (user) => {
   if (!user) return null;
@@ -53,9 +58,8 @@ const resolveShopIdForRole = async ({
     }
     updateData.warehouseIds = [];
   } else if (effectiveRole === "warehouse") {
-    if (shopId !== undefined) {
-      updateData.shopId = null;
-    }
+    // Omborchi omborlar bilan cheklanadi, do'kon biriktirilmaydi.
+    updateData.shopId = null;
 
     if (warehouseIds !== undefined) {
       updateData.warehouseIds = normalizeObjectIdList(warehouseIds);
@@ -70,6 +74,10 @@ const resolveShopIdForRole = async ({
       error.statusCode = 400;
       throw error;
     }
+  } else if (SHOP_ASSIGNABLE_ROLES.includes(effectiveRole)) {
+    // Admin/buxgalter: do'kon ixtiyoriy. Biriktirilsa — faqat o'sha do'kon
+    // ma'lumotlarini ko'radi, bo'sh bo'lsa — hamma do'konni ko'radi.
+    updateData.warehouseIds = [];
   } else {
     updateData.shopId = null;
     updateData.warehouseIds = [];
@@ -95,8 +103,7 @@ exports.getUsers = async (req, res) => {
         .split(",")
         .map((r) => r.trim())
         .filter(Boolean);
-      const allowed = ["admin", "warehouse", "cashier"];
-      const valid = roles.filter((r) => allowed.includes(r));
+      const valid = roles.filter((r) => ASSIGNABLE_ROLES.includes(r));
       if (valid.length === 1) {
         filter.role = valid[0];
       } else if (valid.length > 1) {
@@ -122,7 +129,7 @@ exports.getUsers = async (req, res) => {
     const { paginateQuery } = require("../utils/pagination");
     const result = await paginateQuery({
       Model: User,
-      filter,
+      filter: applyEmployeeScope(req.user, filter),
       queryParams: req.query,
       defaultSort: { createdAt: -1, _id: -1 },
       project: (q) => q.select({ password: 0 }),
@@ -156,10 +163,9 @@ exports.getUserById = async (req, res) => {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
-    const user = await User.findById(id, { password: 0 }).populate(
-      "shopId",
-      "name warehouseId isActive",
-    ).populate("warehouseIds", "name address isActive");
+    const user = await User.findOne(applyEmployeeScope(req.user, { _id: id }), { password: 0 })
+      .populate("shopId", "name warehouseId isActive")
+      .populate("warehouseIds", "name address isActive");
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -180,7 +186,7 @@ exports.updateUser = async (req, res) => {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
-    if (role && !["admin", "warehouse", "cashier"].includes(role)) {
+    if (role && !ASSIGNABLE_ROLES.includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
     }
 
@@ -226,6 +232,10 @@ exports.updateUser = async (req, res) => {
       .populate("shopId", "name warehouseId isActive")
       .populate("warehouseIds", "name address isActive");
 
+    // Rol/do'kon/ombor/menyu o'zgardi — authMiddleware cache'ini tozalaymiz,
+    // aks holda yangi ruxsatlar 15 sekundgacha kuchga kirmaydi.
+    invalidateUserCache(id);
+
     res.json({
       message: "User updated successfully",
       user,
@@ -245,7 +255,12 @@ exports.getMe = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    res.json({ user: serializeUser(user) });
+    const safeUser = serializeUser(user);
+    // Flutter login javobidagi shakl bilan bir xil bo'lishi uchun
+    // do'kon omborini alohida maydon qilib ham qaytaramiz.
+    safeUser.shopWarehouseId = user.shopId?.warehouseId || null;
+
+    res.json({ user: safeUser });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -344,6 +359,7 @@ exports.deleteUser = async (req, res) => {
     }
 
     await User.findByIdAndDelete(id);
+    invalidateUserCache(id);
     res.json({ message: "User deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: error.message });

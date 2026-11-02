@@ -1,8 +1,23 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const Shop = require("../models/Shop");
 
 const USER_CACHE_TTL_MS = 15000;
 const userCache = new Map();
+
+// Foydalanuvchi do'konga biriktirilgan bo'lsa, o'sha do'konning omborini
+// bir marta aniqlab olamiz. Keyin har bir controller `shopWarehouseId` ni
+// tayyor holda ishlatadi — qayta so'rov yuborilmaydi.
+const attachShopWarehouse = async (user) => {
+  if (!user.shopId) {
+    user.shopWarehouseId = null;
+    return user;
+  }
+
+  const shop = await Shop.findById(user.shopId).select("warehouseId isActive").lean();
+  user.shopWarehouseId = shop ? shop.warehouseId : null;
+  return user;
+};
 
 module.exports = async (req, res, next) => {
   try {
@@ -23,7 +38,7 @@ module.exports = async (req, res, next) => {
     }
 
     const user = await User.findById(decoded.id)
-      .select("_id fullName phone role shopId warehouseId isActive")
+      .select("_id fullName phone role shopId warehouseIds allowedMenuKeys isActive")
       .lean();
     if (!user) {
       return res.status(401).json({ message: "Invalid token" });
@@ -31,6 +46,8 @@ module.exports = async (req, res, next) => {
     if (user.isActive === false) {
       return res.status(401).json({ message: "Account is disabled", code: "USER_DISABLED" });
     }
+
+    await attachShopWarehouse(user);
 
     userCache.set(String(decoded.id), {
       user,
@@ -42,4 +59,14 @@ module.exports = async (req, res, next) => {
   } catch (error) {
     res.status(401).json({ message: "Unauthorized" });
   }
+};
+
+// Xodim ma'lumotlari (rol, do'kon, ombor, menyu ruxsatlari) o'zgarganda
+// cache'ni tozalaymiz, aks holda yangi ruxsatlar 15 sekundgacha ishlamaydi.
+module.exports.invalidateUserCache = (userId) => {
+  if (userId === undefined) {
+    userCache.clear();
+    return;
+  }
+  userCache.delete(String(userId));
 };

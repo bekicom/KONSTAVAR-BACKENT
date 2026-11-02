@@ -13,6 +13,12 @@ const InventorySession = require("../models/InventorySession");
 const ShopTransfer = require("../models/ShopTransfer");
 const Client = require("../models/Client");
 const Supplier = require("../models/Supplier");
+const {
+  applyWarehouseScope,
+  warehouseScopeStages,
+  warehouseScopeStagesAny,
+  getAssignedWarehouseIds,
+} = require("../utils/userAccess");
 
 const round2 = (value) => Number(Number(value || 0).toFixed(2));
 const DEFAULT_LOW_STOCK_THRESHOLD = 5;
@@ -119,9 +125,18 @@ exports.getDashboard = async (req, res) => {
   try {
     const lowStockThreshold = DEFAULT_LOW_STOCK_THRESHOLD;
     const period = resolveDashboardRange(req.query);
+    // Do'kon/omborga biriktirilgan foydalanuvchi uchun barcha hisob-kitob
+    // faqat o'ziga ruxsat etilgan omborlar bo'yicha yuritiladi.
+    const scopeStages = warehouseScopeStages(req.user);
+    const transferScopeStages = warehouseScopeStagesAny(req.user, [
+      "sourceWarehouseId",
+      "destinationWarehouseId",
+    ]);
+
     const cacheKey = JSON.stringify({
       role: req.user?.role || "guest",
       shopId: String(req.user?.shopId?._id || req.user?.shopId || ""),
+      scope: getAssignedWarehouseIds(req.user),
       date: req.query.date || null,
       from: req.query.from || null,
       to: req.query.to || null,
@@ -152,9 +167,11 @@ exports.getDashboard = async (req, res) => {
       supplierPaymentBySupplierRows,
       supplierReturnBySupplierRows,
     ] = await Promise.all([
-      Warehouse.find().sort({ createdAt: -1 }).lean(),
-      Shop.find().populate("warehouseId", "name address isActive").lean(),
-      Stock.aggregate([
+      Warehouse.find(applyWarehouseScope(req.user, {}, "_id")).sort({ createdAt: -1 }).lean(),
+      Shop.find(applyWarehouseScope(req.user, {}, "warehouseId"))
+        .populate("warehouseId", "name address isActive")
+        .lean(),
+      Stock.aggregate([...scopeStages,
         {
           $lookup: {
             from: "products",
@@ -210,7 +227,7 @@ exports.getDashboard = async (req, res) => {
         },
       ]),
       Promise.all([
-        Sale.aggregate([
+        Sale.aggregate([...scopeStages,
           {
             $group: {
               _id: null,
@@ -220,7 +237,7 @@ exports.getDashboard = async (req, res) => {
             },
           },
         ]),
-        Purchase.aggregate([
+        Purchase.aggregate([...scopeStages,
           {
             $group: {
               _id: null,
@@ -230,7 +247,7 @@ exports.getDashboard = async (req, res) => {
             },
           },
         ]),
-        SaleReturn.aggregate([
+        SaleReturn.aggregate([...scopeStages,
           {
             $group: {
               _id: null,
@@ -239,7 +256,7 @@ exports.getDashboard = async (req, res) => {
             },
           },
         ]),
-        SupplierReturn.aggregate([
+        SupplierReturn.aggregate([...scopeStages,
           {
             $group: {
               _id: null,
@@ -248,7 +265,7 @@ exports.getDashboard = async (req, res) => {
             },
           },
         ]),
-        Writeoff.aggregate([
+        Writeoff.aggregate([...scopeStages,
           {
             $group: {
               _id: null,
@@ -257,7 +274,7 @@ exports.getDashboard = async (req, res) => {
             },
           },
         ]),
-        ClientPayment.aggregate([
+        ClientPayment.aggregate([...scopeStages,
           {
             $group: {
               _id: null,
@@ -273,7 +290,7 @@ exports.getDashboard = async (req, res) => {
             },
           },
         ]),
-        Stock.aggregate([
+        Stock.aggregate([...scopeStages,
           {
             $lookup: {
               from: "products",
@@ -309,7 +326,7 @@ exports.getDashboard = async (req, res) => {
           },
         ]),
       ]),
-      Sale.aggregate([
+      Sale.aggregate([...scopeStages,
         { $match: { createdAt: { $gte: period.from, $lte: period.to } } },
         {
           $group: {
@@ -319,7 +336,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      Purchase.aggregate([
+      Purchase.aggregate([...scopeStages,
         { $match: { createdAt: { $gte: period.from, $lte: period.to } } },
         {
           $group: {
@@ -329,7 +346,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      SaleReturn.aggregate([
+      SaleReturn.aggregate([...scopeStages,
         { $match: { createdAt: { $gte: period.from, $lte: period.to } } },
         {
           $group: {
@@ -339,7 +356,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      Writeoff.aggregate([
+      Writeoff.aggregate([...scopeStages,
         { $match: { createdAt: { $gte: period.from, $lte: period.to } } },
         {
           $group: {
@@ -349,7 +366,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      ClientPayment.aggregate([
+      ClientPayment.aggregate([...scopeStages,
         { $match: { paymentDate: { $gte: period.from, $lte: period.to } } },
         {
           $group: {
@@ -359,7 +376,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      ShopTransfer.aggregate([
+      ShopTransfer.aggregate([...transferScopeStages,
         { $match: { createdAt: { $gte: period.from, $lte: period.to } } },
         {
           $group: {
@@ -378,7 +395,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      Sale.aggregate([
+      Sale.aggregate([...scopeStages,
         { $match: { dueAmount: { $gt: 0 } } },
         {
           $group: {
@@ -387,7 +404,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      Purchase.aggregate([
+      Purchase.aggregate([...scopeStages,
         { $match: { dueAmount: { $gt: 0 } } },
         {
           $group: {
@@ -396,7 +413,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      InventorySession.aggregate([
+      InventorySession.aggregate([...scopeStages,
         { $sort: { createdAt: -1 } },
         {
           $group: {
@@ -408,7 +425,7 @@ exports.getDashboard = async (req, res) => {
           },
         },
       ]),
-      Stock.aggregate([
+      Stock.aggregate([...scopeStages,
         { $match: { quantity: { $lte: lowStockThreshold } } },
         {
           $lookup: {
@@ -444,7 +461,7 @@ exports.getDashboard = async (req, res) => {
         { $sort: { quantity: 1, updatedAt: -1 } },
         { $limit: 20 },
       ]),
-      Sale.aggregate([
+      Sale.aggregate([...scopeStages,
         { $match: { dueAmount: { $gt: 0 }, clientId: { $ne: null } } },
         {
           $group: {
@@ -457,13 +474,13 @@ exports.getDashboard = async (req, res) => {
         { $sort: { totalDebt: -1, lastSaleAt: -1 } },
         { $limit: 10 },
       ]),
-      Purchase.aggregate([
+      Purchase.aggregate([...scopeStages,
         { $group: { _id: "$supplierId", totalDueRecorded: { $sum: "$dueAmount" } } },
       ]),
       SupplierPayment.aggregate([
         { $group: { _id: "$supplierId", totalPaid: { $sum: "$amount" } } },
       ]),
-      SupplierReturn.aggregate([
+      SupplierReturn.aggregate([...scopeStages,
         { $group: { _id: "$supplierId", totalReturned: { $sum: "$totalAmount" } } },
       ]),
     ]);

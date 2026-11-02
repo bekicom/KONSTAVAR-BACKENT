@@ -15,6 +15,7 @@ const Shift = require("../models/Shift");
 const { requireOpenCashierShift, getOpenCashierShift, resolveCashierShop } = require("../utils/shiftHelper");
 const { loadGlobalSetting } = require("../utils/deletionCodeGuard");
 const { parsePagination, isPaginatedRequest } = require("../utils/pagination");
+const { restrictWarehouseFilter, ensureWarehouseAccess } = require("../utils/userAccess");
 
 const SHOP_WAREHOUSE_CACHE_TTL_MS = 15000;
 const shopWarehouseCache = new Map();
@@ -441,7 +442,7 @@ const styleSheet = (worksheet) => {
   });
 };
 
-const buildSalesReportQuery = async ({ date, from, to, warehouseId, cashierId, shopId }) => {
+const buildSalesReportQuery = async ({ date, from, to, warehouseId, cashierId, shopId, user }) => {
   const range = buildReportRange({ date, from, to });
   const query = {
     createdAt: { $gte: range.from, $lte: range.to },
@@ -474,7 +475,8 @@ const buildSalesReportQuery = async ({ date, from, to, warehouseId, cashierId, s
     query.warehouseId = new mongoose.Types.ObjectId(shop.warehouseId);
   }
 
-  return { query, range };
+  // Do'konga biriktirilgan foydalanuvchi faqat o'z do'koni savdosini ko'radi.
+  return { query: restrictWarehouseFilter(user, query), range };
 };
 
 exports.createSale = async (req, res) => {
@@ -1117,6 +1119,11 @@ exports.getSales = async (req, res) => {
       if (toDateValue) query.createdAt.$lte = toDateValue;
     }
 
+    // Do'kon/ombor cheklovi: biriktirilgan foydalanuvchi boshqa do'kon
+    // savdosini ko'rmaydi (yuqoridagi shoxlar `warehouseId` ni qo'ygan
+    // bo'lsa ham ruxsat qayta tekshiriladi).
+    Object.assign(query, restrictWarehouseFilter(req.user, query));
+
     if (req.query.page === undefined && req.query.skip === undefined && req.query.paginated !== "true") {
       const sales = await Sale.find(query)
         .sort({ createdAt: -1, _id: -1 })
@@ -1199,6 +1206,9 @@ exports.getSalesHistory = async (req, res) => {
       }
       query.warehouseId = new mongoose.Types.ObjectId(shop.warehouseId);
     }
+
+    // Do'konga biriktirilgan foydalanuvchi faqat o'z do'koni savdosini ko'radi.
+    Object.assign(query, restrictWarehouseFilter(req.user, query));
 
     let normalizedLimit = Number(limit);
     if (!Number.isInteger(normalizedLimit) || normalizedLimit <= 0) {
@@ -1526,6 +1536,9 @@ exports.getSalesHistory = async (req, res) => {
       recentSales,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     if (error.message.includes("Invalid") || error.message.includes("cannot")) {
       return res.status(400).json({ message: error.message });
     }
@@ -1544,6 +1557,7 @@ exports.exportSalesHistoryExcel = async (req, res) => {
       warehouseId,
       cashierId,
       shopId,
+      user: req.user,
     });
 
     const sales = await Sale.find(query)
@@ -2023,8 +2037,13 @@ exports.getSaleById = async (req, res) => {
       return res.status(404).json({ message: "Sale not found" });
     }
 
+    ensureWarehouseAccess(req.user, sale.warehouseId?._id || sale.warehouseId);
+
     res.json(sale);
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     res.status(500).json({ message: error.message });
   }
 };
@@ -2916,6 +2935,8 @@ exports.deleteSale = async (req, res) => {
         throw new Error("Sale not found");
       }
 
+      ensureWarehouseAccess(req.user, sale.warehouseId);
+
       const manualCreditPayments = round2(Number(sale.paidAmount || 0) - getSaleInitialPaidAmount(sale));
       if (sale.paymentType === "credit" && manualCreditPayments > 0) {
         throw new Error("Cannot delete credit sale with client payments applied");
@@ -2986,6 +3007,9 @@ const toTiyin = (som) => Math.round(Number(som || 0) * 100);
 
 // Sotuvga tegishli warehouse kassirning do'koniga mosligini tekshiradi.
 const assertSaleAccess = async (user, sale) => {
+  // Do'kon/omborga biriktirilgan har qanday rol uchun umumiy cheklov.
+  ensureWarehouseAccess(user, sale.warehouseId?._id || sale.warehouseId);
+
   if (user?.role !== "cashier") return;
   const allowedWarehouseId = await resolveWarehouseForSale(user, null);
   if (String(sale.warehouseId?._id || sale.warehouseId) !== String(allowedWarehouseId)) {

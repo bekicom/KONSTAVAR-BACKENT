@@ -2,8 +2,32 @@ const mongoose = require("mongoose");
 const Expense = require("../models/Expense");
 const Shift = require("../models/Shift");
 const { requireOpenCashierShift } = require("../utils/shiftHelper");
+const { applyShiftScope, ensureWarehouseAccess, isScopedUser } = require("../utils/userAccess");
 
 const round2 = (value) => Number(Number(value || 0).toFixed(2));
+
+// Do'konga biriktirilgan foydalanuvchi uchun: xarajat o'z do'koni smenasiga
+// tegishli bo'lishi yoki uni o'zi kiritgan bo'lishi kerak.
+const ensureExpenseScope = (req, expense) => {
+  if (!isScopedUser(req.user)) {
+    return true;
+  }
+
+  const createdById = expense.createdBy?._id || expense.createdBy;
+  if (String(createdById) === String(req.user._id)) {
+    return true;
+  }
+
+  const shiftWarehouseId = expense.shiftId?.warehouseId;
+  if (!shiftWarehouseId) {
+    const error = new Error("Access denied for this warehouse");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  ensureWarehouseAccess(req.user, shiftWarehouseId);
+  return true;
+};
 
 const ensureExpenseOwnership = (req, expense) => {
   if (req.user?.role === "admin") {
@@ -158,7 +182,7 @@ exports.getExpenses = async (req, res) => {
     const { paginateQuery } = require("../utils/pagination");
     const result = await paginateQuery({
       Model: Expense,
-      filter: query,
+      filter: await applyShiftScope(req.user, query),
       queryParams: req.query,
       defaultSort: { createdAt: -1, _id: -1 },
       populate: (q) =>
@@ -200,6 +224,7 @@ exports.getExpenseById = async (req, res) => {
     }
 
     ensureExpenseOwnership(req, expense);
+    ensureExpenseScope(req, expense);
 
     return res.json(expense);
   } catch (error) {

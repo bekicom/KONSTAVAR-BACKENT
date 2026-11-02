@@ -6,6 +6,7 @@ const Warehouse = require("../models/Warehouse");
 const Supplier = require("../models/Supplier");
 const Category = require("../models/Category");
 const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
+const { sendError } = require("../utils/sendError");
 
 const PURCHASE_PRODUCT_SELECT =
   "name model barcode categoryId baseUnit hasPackage packageQuantity purchasePrice " +
@@ -530,7 +531,7 @@ exports.createPurchase = async (req, res) => {
       });
     }
 
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -656,7 +657,7 @@ exports.getPurchases = async (req, res) => {
       hasMore: result.hasMore,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -681,7 +682,7 @@ exports.getPurchaseById = async (req, res) => {
 
     res.json(purchase);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -810,7 +811,7 @@ exports.updatePurchase = async (req, res) => {
       return res.status(409).json({ message: "Product barcode must be unique" });
     }
 
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -874,6 +875,6 @@ exports.deletePurchase = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
 
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };

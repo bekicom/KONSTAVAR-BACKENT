@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
@@ -6,7 +7,11 @@ const { getOpenCashierShift } = require("../utils/shiftHelper");
 const {
   normalizeObjectIdList,
   normalizeAllowedMenuKeys,
+  SHOP_ASSIGNABLE_ROLES,
+  SHOP_REQUIRED_ROLES,
 } = require("../utils/userAccess");
+
+const CREATABLE_ROLES = ["admin", "warehouse", "cashier", "bugalter"];
 
 // 🔹 ADMIN CREATE (faqat 1 marta)
 exports.createAdmin = async (req, res) => {
@@ -30,6 +35,9 @@ exports.createAdmin = async (req, res) => {
       phone,
       password: hashedPassword,
       role: "admin",
+      // Bosh admin: do'kon biriktirilmagan, hamma menyu ochiq.
+      shopId: null,
+      allowedMenuKeys: normalizeAllowedMenuKeys("admin", []),
     });
 
     res.status(201).json({
@@ -106,26 +114,41 @@ exports.createUser = async (req, res) => {
   try {
     const { fullName, phone, password, role, shopId, warehouseIds, allowedMenuKeys } = req.body;
 
-    if (!["warehouse", "cashier"].includes(role)) {
+    if (!CREATABLE_ROLES.includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
     }
 
     let resolvedShopId = null;
     let resolvedWarehouseIds = [];
-    if (role === "cashier") {
-      if (!shopId) {
-        return res.status(400).json({ message: "shopId is required for cashier" });
-      }
 
-      const shop = await Shop.findOne({ _id: shopId, isActive: true }).lean();
-      if (!shop) {
-        return res.status(400).json({ message: "Invalid or inactive shopId for cashier" });
-      }
-      resolvedShopId = shop._id;
-    } else if (role === "warehouse") {
+    if (role === "warehouse") {
       resolvedWarehouseIds = normalizeObjectIdList(warehouseIds);
       if (resolvedWarehouseIds.length === 0) {
         return res.status(400).json({ message: "warehouseIds is required for warehouse user" });
+      }
+    } else if (SHOP_ASSIGNABLE_ROLES.includes(role)) {
+      // Do'kon biriktirilsa — foydalanuvchi faqat o'sha do'konni ko'radi.
+      // Kassirda majburiy, admin/buxgalterda ixtiyoriy (bo'sh bo'lsa —
+      // hamma do'konni ko'radigan bosh foydalanuvchi).
+      const rawShopId =
+        shopId === undefined || shopId === null || String(shopId).trim() === ""
+          ? null
+          : String(shopId).trim();
+
+      if (!rawShopId) {
+        if (SHOP_REQUIRED_ROLES.includes(role)) {
+          return res.status(400).json({ message: "shopId is required for cashier" });
+        }
+      } else {
+        if (!mongoose.Types.ObjectId.isValid(rawShopId)) {
+          return res.status(400).json({ message: "Invalid shopId" });
+        }
+
+        const shop = await Shop.findOne({ _id: rawShopId, isActive: true }).lean();
+        if (!shop) {
+          return res.status(400).json({ message: "Invalid or inactive shopId" });
+        }
+        resolvedShopId = shop._id;
       }
     }
 

@@ -17,6 +17,11 @@ const Shift = require("../models/Shift");
 const Expense = require("../models/Expense");
 const User = require("../models/User");
 const { verifyDeletionCodeFromRequest } = require("../utils/deletionCodeGuard");
+const {
+  applyWarehouseScope,
+  applyWarehouseScopeAny,
+  ensureWarehouseAccess,
+} = require("../utils/userAccess");
 
 exports.createShop = async (req, res) => {
   try {
@@ -69,7 +74,9 @@ exports.createShop = async (req, res) => {
 
 exports.getShops = async (req, res) => {
   try {
-    const shops = await Shop.find()
+    // Do'konga yoki omborga biriktirilgan foydalanuvchi faqat o'ziga
+    // tegishli do'konlarni ko'radi.
+    const shops = await Shop.find(applyWarehouseScope(req.user, {}, "warehouseId"))
       .sort({ createdAt: -1 })
       .populate("warehouseId", "name address isActive");
     return res.json(shops);
@@ -85,7 +92,10 @@ exports.getShopById = async (req, res) => {
       return res.status(400).json({ message: "Invalid shop ID" });
     }
 
-    const shop = await Shop.findById(id).populate("warehouseId", "name address isActive");
+    const shop = await Shop.findOne(applyWarehouseScope(req.user, { _id: id }, "warehouseId")).populate(
+      "warehouseId",
+      "name address isActive",
+    );
     if (!shop) {
       return res.status(404).json({ message: "Shop not found" });
     }
@@ -110,6 +120,8 @@ exports.updateShop = async (req, res) => {
     if (!shop) {
       return res.status(404).json({ message: "Shop not found" });
     }
+
+    ensureWarehouseAccess(req.user, shop.warehouseId);
 
     if (name !== undefined) {
       if (!String(name).trim()) {
@@ -152,6 +164,9 @@ exports.updateShop = async (req, res) => {
       shop: populatedShop,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     return res.status(500).json({ message: error.message });
   }
 };
@@ -177,6 +192,7 @@ exports.deleteShop = async (req, res) => {
       if (!shop) {
         throw new Error("Shop not found");
       }
+      ensureWarehouseAccess(req.user, shop.warehouseId);
       const warehouseId = shop.warehouseId;
       const saleDocs = await Sale.find({ warehouseId }).select("clientId").lean();
       const saleIds = saleDocs.map((row) => row._id);
@@ -208,6 +224,9 @@ exports.deleteShop = async (req, res) => {
 
     return res.json({ message: "Shop deleted successfully" });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     if (error.message.includes("not found")) {
       return res.status(404).json({ message: error.message });
     }
@@ -247,6 +266,11 @@ exports.transferToShop = async (req, res) => {
       if (!shop.isActive) {
         throw new Error("Shop is not active");
       }
+
+      // Mahsulot qabul qiluvchi do'kon foydalanuvchiga tegishli bo'lishi
+      // kerak. Manba ombor markaziy ombor bo'lishi mumkin, shuning uchun
+      // u cheklanmaydi.
+      ensureWarehouseAccess(req.user, shop.warehouseId);
 
       if (String(sourceWarehouseId) === String(shop.warehouseId)) {
         throw new Error("sourceWarehouseId cannot be shop warehouse");
@@ -348,6 +372,9 @@ exports.transferToShop = async (req, res) => {
       transfer: populatedTransfer,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     if (
       error.message.includes("Invalid") ||
       error.message.includes("required") ||
@@ -407,7 +434,14 @@ exports.getShopTransfers = async (req, res) => {
     }
     normalizedLimit = Math.min(normalizedLimit, 1000);
 
-    const transfers = await ShopTransfer.find(query)
+    // Cheklangan foydalanuvchi faqat o'z ombori chiqargan yoki o'z omboriga
+    // kelgan biriktirishlarni ko'radi.
+    const scopedQuery = applyWarehouseScopeAny(req.user, query, [
+      "sourceWarehouseId",
+      "destinationWarehouseId",
+    ]);
+
+    const transfers = await ShopTransfer.find(scopedQuery)
       .sort({ createdAt: -1 })
       .limit(normalizedLimit)
       .populate("sourceWarehouseId", "name")

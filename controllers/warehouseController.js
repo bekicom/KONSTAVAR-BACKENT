@@ -12,6 +12,7 @@ const ShopTransfer = require("../models/ShopTransfer");
 const Shop = require("../models/Shop");
 const { applyWarehouseScope, ensureWarehouseAccess } = require("../utils/userAccess");
 const { verifyDeletionCodeFromRequest } = require("../utils/deletionCodeGuard");
+const { sendError } = require("../utils/sendError");
 
 // 🔹 CREATE
 exports.createWarehouse = async (req, res) => {
@@ -33,7 +34,7 @@ exports.createWarehouse = async (req, res) => {
       warehouse,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -45,7 +46,7 @@ exports.getWarehouses = async (req, res) => {
     });
     res.json(warehouses);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -66,7 +67,7 @@ exports.getWarehouseById = async (req, res) => {
 
     res.json(warehouse);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -77,6 +78,8 @@ exports.updateWarehouse = async (req, res) => {
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid warehouse ID" });
     }
+
+    ensureWarehouseAccess(req.user, id);
 
     const warehouse = await Warehouse.findByIdAndUpdate(id, req.body, {
       new: true,
@@ -91,7 +94,7 @@ exports.updateWarehouse = async (req, res) => {
       warehouse,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };
 
@@ -107,6 +110,8 @@ exports.deleteWarehouse = async (req, res) => {
     if (!warehouse) {
       return res.status(404).json({ message: "Warehouse not found" });
     }
+
+    ensureWarehouseAccess(req.user, id);
 
     const codeCheck = await verifyDeletionCodeFromRequest(req);
     if (!codeCheck.ok) {
@@ -142,6 +147,6 @@ exports.deleteWarehouse = async (req, res) => {
       message: "Warehouse deleted successfully",
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendError(res, error);
   }
 };

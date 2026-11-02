@@ -6,7 +6,8 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "smoke:api": "node scripts/api-smoke-test.js",
-    "test:e2e": "node scripts/e2e-full-run.js"
+    "test:e2e": "node scripts/e2e-full-run.js",
+    "test:scope": "node scripts/scope-smoke-test.js"
   },
   "keywords": [],
   "author": "",
